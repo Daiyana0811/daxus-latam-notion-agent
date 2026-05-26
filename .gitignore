@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+*.log
+course.html
+listing.html
+course_screenshot.png
+cards.json
+images.json
+links.json
+texts.json
+modules_structure.txt
+
+debug*.js
+extract*.js

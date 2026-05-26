@@ -1,0 +1,19 @@
+{
+  "name": "daxus-latam-notion-agent",
+  "version": "1.0.0",
+  "description": "Scheduled Daxus LATAM course scraper and Notion database sync agent.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "check": "node --check index.js && node --check scraper.js && node --check notion.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@notionhq/client": "^5.21.0",
+    "dotenv": "^17.4.2",
+    "playwright": "^1.60.0"
+  }
+}
