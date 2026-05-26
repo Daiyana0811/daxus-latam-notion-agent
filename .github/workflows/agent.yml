@@ -1,0 +1,65 @@
+name: Daxus LATAM to Notion Agent
+
+on:
+  schedule:
+    # Every Monday at 14:00 UTC, which is 09:00 in America/Bogota.
+    # The first step skips all Mondays except the last Monday of the month.
+    - cron: '0 14 * * 1'
+  workflow_dispatch:
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check schedule
+        id: schedule_check
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          current_month="$(date -u +%m)"
+          next_week_month="$(date -u -d '+7 days' +%m)"
+
+          if [ "$current_month" != "$next_week_month" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping because this Monday is not the last Monday of the month."
+          fi
+
+      - name: Checkout repository
+        if: steps.schedule_check.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: steps.schedule_check.outputs.should_run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.schedule_check.outputs.should_run == 'true'
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        if: steps.schedule_check.outputs.should_run == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Validate source
+        if: steps.schedule_check.outputs.should_run == 'true'
+        run: npm run check
+
+      - name: Run agent
+        if: steps.schedule_check.outputs.should_run == 'true'
+        env:
+          DAXUS_EMAIL: ${{ secrets.DAXUS_EMAIL }}
+          DAXUS_PASSWORD: ${{ secrets.DAXUS_PASSWORD }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: npm start
