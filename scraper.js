@@ -11,40 +11,103 @@ function normalizeText(value, fallback = '') {
 }
 
 function uniqueCards(cards) {
-  const seenUrls = new Set();
-  return cards.filter(card => {
-    if (!card.url || seenUrls.has(card.url) || card.url.endsWith('/dashboard')) {
-      return false;
+  const unique = [];
+  const indexesByUrl = new Map();
+
+  for (const card of cards) {
+    if (!card.url || card.url.endsWith('/dashboard')) {
+      continue;
     }
-    seenUrls.add(card.url);
-    return true;
-  });
+
+    if (!indexesByUrl.has(card.url)) {
+      indexesByUrl.set(card.url, unique.length);
+      unique.push(card);
+      continue;
+    }
+
+    const existingIndex = indexesByUrl.get(card.url);
+    if (!unique[existingIndex].category && card.category) {
+      unique[existingIndex] = { ...unique[existingIndex], category: card.category };
+    }
+  }
+
+  return unique;
 }
 
 async function extractCourseCards(page) {
-  const cards = await page.$$eval('a', links => {
-    return links
-      .filter(link => {
-        const image = link.querySelector('img');
-        const isCourseLink = /\/course[s]?\//.test(link.href) || /\/\d+-/.test(link.href);
-        return image && isCourseLink && !link.href.includes('/categories');
-      })
-      .map(link => ({
-        url: link.href,
-        coverUrl: link.querySelector('img').src
-      }));
+  const cards = await page.evaluate(() => {
+    function cleanCategoryText(value) {
+      return (value || '')
+        .replace(/\s+/g, ' ')
+        .replace(/\s*Ver todo.*$/i, '')
+        .trim();
+    }
+
+    function isCategoryCandidate(value) {
+      if (!value || value.length > 80) {
+        return false;
+      }
+
+      return !/^(buscar|catalogo|categorias|cursos|inicio|mi aprendizaje|ver todo)$/i.test(value);
+    }
+
+    const courseLinks = Array.from(document.querySelectorAll('a')).filter(link => {
+      const image = link.querySelector('img');
+      const isCourseLink = /\/course[s]?\//.test(link.href) || /\/\d+-/.test(link.href);
+      return image && isCourseLink && !link.href.includes('/categories');
+    });
+
+    const courseLinkSet = new Set(courseLinks);
+    const extractedCards = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    let currentCategory = '';
+    let element = walker.currentNode;
+
+    while (element) {
+      if (courseLinkSet.has(element)) {
+        const image = element.querySelector('img');
+        extractedCards.push({
+          url: element.href,
+          coverUrl: image && image.src ? image.src : '',
+          category: currentCategory
+        });
+      } else if (!courseLinkSet.has(element.closest('a'))) {
+        const tagName = element.tagName.toLowerCase();
+        const role = (element.getAttribute('role') || '').toLowerCase();
+        const className = String(element.className || '').toLowerCase();
+        const looksLikeHeading =
+          /^h[1-4]$/.test(tagName) ||
+          role === 'heading' ||
+          /category|collection|heading|section|shelf|title/.test(className);
+
+        if (looksLikeHeading) {
+          const category = cleanCategoryText(element.innerText);
+          if (isCategoryCandidate(category)) {
+            currentCategory = category;
+          }
+        }
+      }
+
+      element = walker.nextNode();
+    }
+
+    return extractedCards;
   });
 
   return uniqueCards(cards);
 }
 
 async function extractFallbackCourseCards(page) {
-  const cards = await page.$$eval('a', links => {
-    return links
+  const cards = await page.evaluate(() => {
+    const pageHeading = document.querySelector('h1, h2, h3, [role="heading"]');
+    const category = pageHeading ? pageHeading.innerText.replace(/\s+/g, ' ').trim() : 'Comienza por aqui';
+
+    return Array.from(document.querySelectorAll('a'))
       .filter(link => link.querySelector('img') && link.href.includes('/course'))
       .map(link => ({
         url: link.href,
-        coverUrl: link.querySelector('img').src
+        coverUrl: link.querySelector('img').src,
+        category
       }));
   });
 
@@ -83,7 +146,11 @@ async function scrapeCourses() {
       courseCards = await extractFallbackCourseCards(page);
     }
 
-    console.log(`Found ${courseCards.length} unique course cards.`);
+    const categories = Array.from(new Set(courseCards.map(card => card.category).filter(Boolean)));
+    console.log(`Found ${courseCards.length} unique course cards across ${categories.length} categories.`);
+    if (categories.length > 0) {
+      console.log(`Categories detected: ${categories.join(', ')}`);
+    }
 
     const courses = [];
 
@@ -193,6 +260,7 @@ async function scrapeCourses() {
         title: normalizeText(title, 'Untitled course'),
         description: normalizeText(description, 'No detailed description.'),
         duration: normalizeText(duration, 'Duration not specified'),
+        category: normalizeText(card.category, 'Sin categoria'),
         coverUrl: card.coverUrl,
         url: card.url,
         modules

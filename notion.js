@@ -4,6 +4,7 @@ const { Client } = require('@notionhq/client');
 
 const notionApiKey = process.env.NOTION_API_KEY;
 const databaseId = process.env.NOTION_DATABASE_ID;
+const CATEGORY_PROPERTY_NAME = 'Categoria';
 
 if (!notionApiKey) {
   throw new Error('Missing required environment variable: NOTION_API_KEY');
@@ -15,6 +16,41 @@ if (!databaseId) {
 
 const notion = new Client({ auth: notionApiKey });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function normalizeSelectName(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > 100 ? text.slice(0, 100).trim() : text;
+}
+
+function getCategoryOptions(courses) {
+  return Array.from(new Set(courses.map(course => normalizeSelectName(course.category)).filter(Boolean)))
+    .map(name => ({ name, color: 'default' }));
+}
+
+async function ensureCategoryProperty(courses) {
+  const database = await notion.databases.retrieve({ database_id: databaseId });
+  const existingProperty = database.properties[CATEGORY_PROPERTY_NAME];
+
+  if (existingProperty) {
+    if (existingProperty.type !== 'select') {
+      throw new Error(`The Notion property "${CATEGORY_PROPERTY_NAME}" must be a select property.`);
+    }
+
+    return;
+  }
+
+  const options = getCategoryOptions(courses);
+  await notion.databases.update({
+    database_id: databaseId,
+    properties: {
+      [CATEGORY_PROPERTY_NAME]: {
+        select: options.length > 0 ? { options } : {}
+      }
+    }
+  });
+
+  console.log(`Created Notion select property: ${CATEGORY_PROPERTY_NAME}`);
+}
 
 async function listExistingCourses() {
   const existingCourses = {};
@@ -49,6 +85,7 @@ async function listExistingCourses() {
 }
 
 function buildProperties(course) {
+  const category = normalizeSelectName(course.category);
   const properties = {
     'Nombre del recurso': {
       title: [
@@ -61,6 +98,12 @@ function buildProperties(course) {
       select: { name: 'Niveles' }
     }
   };
+
+  if (category) {
+    properties[CATEGORY_PROPERTY_NAME] = {
+      select: { name: category }
+    };
+  }
 
   if (course.coverUrl && course.coverUrl.startsWith('http')) {
     properties['Archivos y multimedia'] = {
@@ -192,6 +235,7 @@ async function createCoursePage(properties, blocks) {
 async function syncCoursesWithDatabase(courses) {
   try {
     console.log(`Syncing ${courses.length} courses with Notion database...`);
+    await ensureCategoryProperty(courses);
     const existingCourses = await listExistingCourses();
     console.log(`Existing courses in Notion: ${Object.keys(existingCourses).length}`);
 
