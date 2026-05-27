@@ -16,6 +16,7 @@ if (!databaseId) {
 
 const notion = new Client({ auth: notionApiKey });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+let cachedDataSourceId;
 
 function normalizeSelectName(value) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
@@ -27,8 +28,51 @@ function getCategoryOptions(courses) {
     .map(name => ({ name, color: 'default' }));
 }
 
-async function ensureCategoryProperty(courses) {
+async function getDataSourceId() {
+  if (cachedDataSourceId !== undefined) {
+    return cachedDataSourceId;
+  }
+
   const database = await notion.databases.retrieve({ database_id: databaseId });
+
+  if (database.data_sources && database.data_sources.length > 0) {
+    cachedDataSourceId = database.data_sources[0].id;
+    return cachedDataSourceId;
+  }
+
+  cachedDataSourceId = null;
+  return cachedDataSourceId;
+}
+
+async function retrieveSchema() {
+  const dataSourceId = await getDataSourceId();
+
+  if (dataSourceId) {
+    return notion.dataSources.retrieve({ data_source_id: dataSourceId });
+  }
+
+  return notion.databases.retrieve({ database_id: databaseId });
+}
+
+async function updateSchemaProperty(propertyConfig) {
+  const dataSourceId = await getDataSourceId();
+
+  if (dataSourceId) {
+    await notion.dataSources.update({
+      data_source_id: dataSourceId,
+      properties: propertyConfig
+    });
+    return;
+  }
+
+  await notion.databases.update({
+    database_id: databaseId,
+    properties: propertyConfig
+  });
+}
+
+async function ensureCategoryProperty(courses) {
+  const database = await retrieveSchema();
   const existingProperty = database.properties[CATEGORY_PROPERTY_NAME];
 
   if (existingProperty) {
@@ -40,19 +84,57 @@ async function ensureCategoryProperty(courses) {
   }
 
   const options = getCategoryOptions(courses);
-  await notion.databases.update({
-    database_id: databaseId,
-    properties: {
-      [CATEGORY_PROPERTY_NAME]: {
-        select: options.length > 0 ? { options } : {}
-      }
+  await updateSchemaProperty({
+    [CATEGORY_PROPERTY_NAME]: {
+      select: options.length > 0 ? { options } : {}
     }
   });
 
   console.log(`Created Notion select property: ${CATEGORY_PROPERTY_NAME}`);
 }
 
+function getPageTitle(page) {
+  const titlePropKey = Object.keys(page.properties).find(key => page.properties[key].type === 'title');
+  const title = titlePropKey && page.properties[titlePropKey].title[0];
+  return title ? title.plain_text.trim() : '';
+}
+
 async function listExistingCourses() {
+  const dataSourceId = await getDataSourceId();
+
+  if (dataSourceId) {
+    return listExistingCoursesFromDataSource(dataSourceId);
+  }
+
+  return listExistingCoursesFromDatabaseSearch();
+}
+
+async function listExistingCoursesFromDataSource(dataSourceId) {
+  const existingCourses = {};
+  let cursor;
+
+  do {
+    const queryResults = await notion.dataSources.query({
+      data_source_id: dataSourceId,
+      page_size: 100,
+      start_cursor: cursor
+    });
+
+    for (const page of queryResults.results) {
+      const title = getPageTitle(page);
+
+      if (title) {
+        existingCourses[title] = page.id;
+      }
+    }
+
+    cursor = queryResults.has_more ? queryResults.next_cursor : undefined;
+  } while (cursor);
+
+  return existingCourses;
+}
+
+async function listExistingCoursesFromDatabaseSearch() {
   const existingCourses = {};
   let cursor;
 
@@ -70,11 +152,10 @@ async function listExistingCourses() {
         continue;
       }
 
-      const titlePropKey = Object.keys(page.properties).find(key => page.properties[key].type === 'title');
-      const title = titlePropKey && page.properties[titlePropKey].title[0];
+      const title = getPageTitle(page);
 
       if (title) {
-        existingCourses[title.plain_text.trim()] = page.id;
+        existingCourses[title] = page.id;
       }
     }
 
@@ -225,8 +306,11 @@ async function updateCoursePage(pageId, course, properties, blocks) {
 }
 
 async function createCoursePage(properties, blocks) {
+  const dataSourceId = await getDataSourceId();
+  const parent = dataSourceId ? { data_source_id: dataSourceId } : { type: 'database_id', database_id: databaseId };
+
   await notion.pages.create({
-    parent: { type: 'database_id', database_id: databaseId },
+    parent,
     properties,
     children: blocks
   });
