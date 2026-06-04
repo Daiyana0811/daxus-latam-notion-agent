@@ -135,6 +135,14 @@ async function scrapeCourses() {
 
     console.log('Session started.');
 
+    if (page.url().includes('/onboarding')) {
+      console.log('Accepting Daxus LATAM onboarding terms...');
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {}),
+        page.getByRole('button', { name: 'Estoy de acuerdo', exact: true }).click()
+      ]);
+    }
+
     await page.goto(COURSE_LIST_URL, { waitUntil: 'networkidle', timeout: 30000 });
 
     console.log('Extracting course links...');
