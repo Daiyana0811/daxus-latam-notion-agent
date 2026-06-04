@@ -61,5 +61,5 @@ jobs:
           DAXUS_EMAIL: ${{ secrets.DAXUS_EMAIL }}
           DAXUS_PASSWORD: ${{ secrets.DAXUS_PASSWORD }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_DATABASE_ID: 901c32bcda2c8204a1ff817988963f14
         run: npm start
