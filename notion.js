@@ -121,6 +121,10 @@ async function listExistingCoursesFromDataSource(dataSourceId) {
     });
 
     for (const page of queryResults.results) {
+      if (page.archived || page.in_trash) {
+        continue;
+      }
+
       const title = getPageTitle(page);
 
       if (title) {
@@ -147,6 +151,10 @@ async function listExistingCoursesFromDatabaseSearch() {
     });
 
     for (const page of searchResults.results) {
+      if (page.archived || page.in_trash) {
+        continue;
+      }
+
       const parentDatabaseId = page.parent && page.parent.database_id;
       if (!parentDatabaseId || parentDatabaseId.replace(/-/g, '') !== databaseId.replace(/-/g, '')) {
         continue;
