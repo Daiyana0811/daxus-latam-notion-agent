@@ -12,6 +12,7 @@ images.json
 links.json
 texts.json
 modules_structure.txt
+transcriptions/
 
 debug*.js
 extract*.js

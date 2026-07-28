@@ -5,7 +5,10 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check scraper.js && node --check notion.js"
+    "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcription.js",
+    "transcribe:test": "node transcription.js \"Liderazgo Personal\"",
+    "transcribe:api": "node transcription.js \"Liderazgo Personal\"",
+    "transcribe:metadata": "node transcription.js \"Liderazgo Personal\" --metadata-only"
   },
   "keywords": [],
   "author": "",
@@ -13,7 +16,10 @@
   "type": "commonjs",
   "dependencies": {
     "@notionhq/client": "^5.21.0",
+    "docx": "^9.7.1",
     "dotenv": "^17.4.2",
+    "ffmpeg-static": "^5.3.0",
+    "openai": "^7.0.0",
     "playwright": "^1.60.0"
   }
 }

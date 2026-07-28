@@ -16,6 +16,8 @@ Configure these repository secrets before enabling the workflow:
 - `DAXUS_PASSWORD`
 - `NOTION_API_KEY`
 - `NOTION_DATABASE_ID`
+- `OPENAI_API_KEY` when using API-based transcription
+- `OPENAI_TRANSCRIPTION_MODEL` optional, defaults to `gpt-4o-mini-transcribe`
 
 The local `.env` file is intentionally ignored and must not be committed.
 
@@ -25,3 +27,17 @@ The local `.env` file is intentionally ignored and must not be committed.
 npm ci
 npm run check
 ```
+
+## Local transcription test
+
+Generate the local Word transcript for the test course:
+
+```bash
+npm run transcribe:api
+```
+
+The transcription flow checks that the Notion course has an empty `Apostilla`
+files property, extracts the Daxus lesson structure, transcribes video lessons,
+groups the final Word document by module, and deletes temporary audio/text files
+after the `.docx` is created. The local test does not upload the document to
+Notion.
