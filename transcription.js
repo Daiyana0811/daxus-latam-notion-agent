@@ -20,7 +20,7 @@ const LOGIN_URL = 'https://miembro.daxus.com/users/sign_in';
 const COURSE_LIST_URL = 'https://miembro.daxus.com/?browse=available';
 const TRANSCRIPTION_PROPERTY_NAME = 'Transcripcion';
 const APOSTILLA_PROPERTY_NAME = 'Apostilla';
-const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe';
+const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe';
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 

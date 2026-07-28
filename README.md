@@ -17,7 +17,7 @@ Configure these repository secrets before enabling the workflow:
 - `NOTION_API_KEY`
 - `NOTION_DATABASE_ID`
 - `OPENAI_API_KEY` when using API-based transcription
-- `OPENAI_TRANSCRIPTION_MODEL` optional, defaults to `gpt-4o-mini-transcribe`
+- `OPENAI_TRANSCRIPTION_MODEL` optional, defaults to `gpt-4o-transcribe`
 
 The local `.env` file is intentionally ignored and must not be committed.
 
