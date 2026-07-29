@@ -72,6 +72,13 @@ jobs:
         if: steps.schedule_check.outputs.should_run == 'true'
         run: npx playwright install --with-deps chromium
 
+      - name: Install FFmpeg
+        if: steps.schedule_check.outputs.should_run == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+
       - name: Validate source
         if: steps.schedule_check.outputs.should_run == 'true'
         run: npm run check
@@ -94,6 +101,7 @@ jobs:
           NOTION_DATABASE_ID: 901c32bcda2c8204a1ff817988963f14
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_TRANSCRIPTION_MODEL: ${{ secrets.OPENAI_TRANSCRIPTION_MODEL }}
+          FFMPEG_PATH: ffmpeg
           COURSE_LIMIT: ${{ github.event.inputs.course_limit }}
           OVERWRITE_TRANSCRIPTIONS: ${{ github.event.inputs.overwrite }}
         shell: bash

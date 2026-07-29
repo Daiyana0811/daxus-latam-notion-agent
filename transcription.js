@@ -6,7 +6,7 @@ const { spawn } = require('child_process');
 const { chromium } = require('playwright');
 const { Client } = require('@notionhq/client');
 const OpenAI = require('openai');
-const ffmpegPath = require('ffmpeg-static');
+const ffmpegPath = process.env.FFMPEG_PATH || require('ffmpeg-static');
 const {
   Document,
   Packer,
