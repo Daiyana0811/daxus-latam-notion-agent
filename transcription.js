@@ -304,13 +304,13 @@ function runProcess(command, args, options = {}) {
     });
 
     child.on('error', reject);
-    child.on('close', code => {
+    child.on('close', (code, signal) => {
       if (code === 0) {
         resolve({ stdout, stderr });
         return;
       }
 
-      reject(new Error(`${command} exited with code ${code}\n${stderr || stdout}`));
+      reject(new Error(`${command} exited with code ${code}${signal ? ` and signal ${signal}` : ''}\n${stderr || stdout}`));
     });
   });
 }
@@ -319,7 +319,7 @@ async function extractAudio(lesson, outputPath) {
   const headers = [
     'Referer: https://miembro.daxus.com/',
     'User-Agent: Mozilla/5.0'
-  ].join('\r\n');
+  ].join('\r\n') + '\r\n';
 
   await runProcess(ffmpegPath, [
     '-y',
