@@ -39,5 +39,21 @@ npm run transcribe:api
 The transcription flow checks that the Notion course has an empty `Apostilla`
 files property, extracts the Daxus lesson structure, transcribes video lessons,
 groups the final Word document by module, and deletes temporary audio/text files
-after the `.docx` is created. The local test does not upload the document to
-Notion.
+after the `.docx` is created.
+
+Upload the test course transcript to Notion:
+
+```bash
+npm run transcribe:upload
+```
+
+Run the production transcription pass for every pending Notion course:
+
+```bash
+npm run transcribe:all
+```
+
+The production pass processes courses where `Apostilla` is empty and
+`Transcripcion` is still empty. Use `--overwrite` or
+`--include-existing-transcriptions` only when an existing transcript should be
+replaced.

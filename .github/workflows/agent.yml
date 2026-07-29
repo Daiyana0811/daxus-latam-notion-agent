@@ -10,7 +10,7 @@ on:
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 360
 
     steps:
       - name: Check schedule
@@ -63,3 +63,14 @@ jobs:
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: 901c32bcda2c8204a1ff817988963f14
         run: npm start
+
+      - name: Run transcription upload
+        if: steps.schedule_check.outputs.should_run == 'true'
+        env:
+          DAXUS_EMAIL: ${{ secrets.DAXUS_EMAIL }}
+          DAXUS_PASSWORD: ${{ secrets.DAXUS_PASSWORD }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: 901c32bcda2c8204a1ff817988963f14
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_TRANSCRIPTION_MODEL: ${{ secrets.OPENAI_TRANSCRIPTION_MODEL }}
+        run: npm run transcribe:all

@@ -8,6 +8,8 @@
     "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcription.js",
     "transcribe:test": "node transcription.js \"Liderazgo Personal\"",
     "transcribe:api": "node transcription.js \"Liderazgo Personal\"",
+    "transcribe:upload": "node transcription.js \"Liderazgo Personal\" --upload-notion",
+    "transcribe:all": "node transcription.js --all --upload-notion",
     "transcribe:metadata": "node transcription.js \"Liderazgo Personal\" --metadata-only"
   },
   "keywords": [],
