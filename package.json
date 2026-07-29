@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcription.js",
+    "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcription.js && node --check scripts/count-pending-transcriptions.js",
     "transcribe:test": "node transcription.js \"Liderazgo Personal\"",
     "transcribe:api": "node transcription.js \"Liderazgo Personal\"",
     "transcribe:upload": "node transcription.js \"Liderazgo Personal\" --upload-notion",

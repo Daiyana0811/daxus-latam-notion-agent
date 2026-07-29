@@ -7,6 +7,12 @@ This agent signs in to Daxus LATAM, extracts available course data with Playwrig
 The workflow runs every Monday at 14:00 UTC and skips execution unless that Monday is the last Monday of the month. In America/Bogota, that is 9:00 AM.
 
 It can also be run manually from the GitHub Actions tab with `workflow_dispatch`.
+Manual runs support transcription batches:
+
+- `skip_sync=true` runs only transcription without refreshing the course catalog.
+- `course_limit=3` processes three pending courses in that run.
+- `auto_continue=true` queues the next batch until Notion has no pending courses.
+- `overwrite=true` replaces existing `Transcripcion` files.
 
 ## Required GitHub secrets
 
