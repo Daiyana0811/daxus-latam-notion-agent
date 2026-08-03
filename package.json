@@ -6,9 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcription.js && node --check scripts/count-pending-transcriptions.js",
-    "transcribe:test": "node transcription.js \"Liderazgo Personal\"",
-    "transcribe:api": "node transcription.js \"Liderazgo Personal\"",
-    "transcribe:upload": "node transcription.js \"Liderazgo Personal\" --upload-notion",
+    "transcribe:test": "node transcription.js \"Proyectos con Lovable\" --keep-intermediate",
+    "transcribe:sharepoint": "node transcription.js \"Proyectos con Lovable\"",
+    "transcribe:upload": "node transcription.js \"Proyectos con Lovable\" --upload-notion",
     "transcribe:all": "node transcription.js --all --upload-notion",
     "transcribe:metadata": "node transcription.js \"Liderazgo Personal\" --metadata-only"
   },
@@ -20,8 +20,6 @@
     "@notionhq/client": "^5.21.0",
     "docx": "^9.7.1",
     "dotenv": "^17.4.2",
-    "ffmpeg-static": "^5.3.0",
-    "openai": "^7.0.0",
     "playwright": "^1.60.0"
   }
 }
