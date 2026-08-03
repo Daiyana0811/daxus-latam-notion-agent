@@ -2,11 +2,8 @@ require('dotenv').config();
 
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
 const { chromium } = require('playwright');
 const { Client } = require('@notionhq/client');
-const OpenAI = require('openai');
-const ffmpegPath = process.env.FFMPEG_PATH || require('ffmpeg-static');
 const {
   Document,
   Packer,
@@ -16,14 +13,18 @@ const {
   AlignmentType
 } = require('docx');
 
-const LOGIN_URL = 'https://miembro.daxus.com/users/sign_in';
-const COURSE_LIST_URL = 'https://miembro.daxus.com/?browse=available';
 const TRANSCRIPTION_PROPERTY_NAME = 'Transcripcion';
 const APOSTILLA_PROPERTY_NAME = 'Apostilla';
-const OPENAI_TRANSCRIPTION_MODEL = process.env.OPENAI_TRANSCRIPTION_MODEL || 'gpt-4o-transcribe';
 const DOCX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
+const SHAREPOINT_SITE_BASE_URL = (process.env.SHAREPOINT_SITE_BASE_URL || 'https://zakidatasas.sharepoint.com/sites/general').replace(/\/$/, '');
+const SHAREPOINT_COURSES_SERVER_RELATIVE = process.env.SHAREPOINT_COURSES_SERVER_RELATIVE ||
+  '/sites/general/Documentos compartidos/1. COMUNICACIONES/1.CURSOS';
+const SHAREPOINT_DISCOVERY_DEPTH = Number(process.env.SHAREPOINT_DISCOVERY_DEPTH || 6);
+const SHAREPOINT_DISCOVERY_LIMIT = Number(process.env.SHAREPOINT_DISCOVERY_LIMIT || 2000);
+
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
+const collator = new Intl.Collator('es', { numeric: true, sensitivity: 'base' });
 
 function normalizeText(value) {
   return String(value || '')
@@ -42,6 +43,14 @@ function sanitizeFileName(value) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 120);
+}
+
+function getSharePointUser() {
+  return process.env.SHAREPOINT_EMAIL || process.env.MICROSOFT_EMAIL || '';
+}
+
+function getSharePointPassword() {
+  return process.env.SHAREPOINT_PASSWORD || process.env.MICROSOFT_PASSWORD || '';
 }
 
 function getTitle(page) {
@@ -63,6 +72,77 @@ function getFilesCount(property) {
   }
 
   return property.files.length;
+}
+
+function escapeODataStringLiteral(value) {
+  return String(value || '').replace(/'/g, "''");
+}
+
+function sharePointApiUrl(serverRelativeUrl, collection, select) {
+  const quotedPath = `'${escapeODataStringLiteral(serverRelativeUrl)}'`;
+  const encodedPath = encodeURIComponent(quotedPath);
+  return `${SHAREPOINT_SITE_BASE_URL}/_api/web/GetFolderByServerRelativePath(decodedurl=@folder)/${collection}?@folder=${encodedPath}&$select=${encodeURIComponent(select)}`;
+}
+
+function streamUrlFor(serverRelativeUrl) {
+  return `${SHAREPOINT_SITE_BASE_URL}/_layouts/15/stream.aspx?id=${encodeURIComponent(serverRelativeUrl)}&referrer=StreamWebApp.Web&referrerScenario=AddressBarCopied.view`;
+}
+
+function parseVtt(vttText) {
+  return String(vttText || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line =>
+      line &&
+      !/^WEBVTT/i.test(line) &&
+      !/^NOTE\b/i.test(line) &&
+      !/^\d+$/.test(line) &&
+      !/-->/i.test(line)
+    )
+    .map(line => line.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseTranscriptTimeToSeconds(label) {
+  const value = normalizeText(label);
+  let total = 0;
+
+  const hours = value.match(/(\d+)\s*hora/);
+  if (hours) {
+    total += Number(hours[1]) * 3600;
+  }
+
+  const minutes = value.match(/(\d+)\s*minuto/);
+  if (minutes) {
+    total += Number(minutes[1]) * 60;
+  }
+
+  const seconds = value.match(/(\d+)\s*segundo/);
+  if (seconds) {
+    total += Number(seconds[1]);
+  }
+
+  return total;
+}
+
+function groupLessonsByModule(lessons) {
+  const groups = [];
+  const indexesByModule = new Map();
+
+  for (const lesson of lessons) {
+    const moduleTitle = lesson.moduleTitle || 'Sin modulo';
+    if (!indexesByModule.has(moduleTitle)) {
+      indexesByModule.set(moduleTitle, groups.length);
+      groups.push({ title: moduleTitle, lessons: [] });
+    }
+
+    groups[indexesByModule.get(moduleTitle)].lessons.push(lesson);
+  }
+
+  return groups;
 }
 
 async function getDataSourceId(databaseId) {
@@ -125,232 +205,342 @@ async function listNotionCourses() {
   return courses;
 }
 
-async function signIn(page) {
-  await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await page.fill('input[type="email"]', process.env.DAXUS_EMAIL);
-  await page.fill('input[type="password"]', process.env.DAXUS_PASSWORD);
+async function createBrowserContext(browser) {
+  if (process.env.SHAREPOINT_STORAGE_STATE) {
+    return browser.newContext({ acceptDownloads: true, storageState: process.env.SHAREPOINT_STORAGE_STATE });
+  }
 
+  if (process.env.SHAREPOINT_STORAGE_STATE_B64) {
+    const storagePath = path.join(process.cwd(), '.sharepoint-storage-state.json');
+    await fs.promises.writeFile(
+      storagePath,
+      Buffer.from(process.env.SHAREPOINT_STORAGE_STATE_B64, 'base64').toString('utf8')
+    );
+    return browser.newContext({ acceptDownloads: true, storageState: storagePath });
+  }
+
+  return browser.newContext({ acceptDownloads: true });
+}
+
+async function signInSharePoint(page) {
+  await page.goto(SHAREPOINT_SITE_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(2000);
+
+  if (!/login\.microsoftonline\.com|login\.live\.com/i.test(page.url())) {
+    return;
+  }
+
+  const email = getSharePointUser();
+  const password = getSharePointPassword();
+
+  if (!email || !password) {
+    throw new Error('SharePoint pide inicio de sesion. Configura SHAREPOINT_EMAIL y SHAREPOINT_PASSWORD, o SHAREPOINT_STORAGE_STATE_B64 si la cuenta usa MFA.');
+  }
+
+  const emailInput = page.locator('input[type="email"], input[name="loginfmt"]').first();
+  if (await emailInput.count()) {
+    await emailInput.fill(email);
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
+      page.keyboard.press('Enter')
+    ]);
+  }
+
+  const passwordInput = page.locator('input[type="password"], input[name="passwd"]').first();
+  await passwordInput.waitFor({ state: 'visible', timeout: 30000 });
+  await passwordInput.fill(password);
   await Promise.all([
-    page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {}),
+    page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
     page.keyboard.press('Enter')
   ]);
 
-  if (page.url().includes('/onboarding')) {
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 }).catch(() => {}),
-      page.getByRole('button', { name: 'Estoy de acuerdo', exact: true }).click()
-    ]);
-  }
-}
-
-async function findDaxusCourseUrl(page, courseName) {
-  await page.goto(COURSE_LIST_URL, { waitUntil: 'networkidle', timeout: 30000 });
-  const target = normalizeText(courseName);
-
-  const links = await page.evaluate(() => Array.from(document.querySelectorAll('a')).map(link => ({
-    href: link.href,
-    text: (link.innerText || link.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(),
-    imageAlt: link.querySelector('img')?.getAttribute('alt') || '',
-    hasImage: Boolean(link.querySelector('img'))
-  })));
-
-  const match = links.find(link => {
-    const combined = normalizeText(`${link.text} ${link.imageAlt} ${link.href}`);
-    return link.hasImage && combined.includes(target.replace(/\s+/g, '-'));
-  }) || links.find(link => normalizeText(`${link.text} ${link.imageAlt} ${link.href}`).includes(target));
-
-  if (!match) {
-    throw new Error(`No encontre el curso "${courseName}" en Daxus.`);
-  }
-
-  return match.href;
-}
-
-async function extractLessons(page, courseUrl) {
-  await page.goto(courseUrl, { waitUntil: 'networkidle', timeout: 30000 });
-
-  return page.evaluate(() => {
-    const lessons = [];
-    const headings = document.querySelectorAll('h4');
-
-    for (const heading of headings) {
-      const spans = heading.querySelectorAll('span');
-      let moduleTitle = '';
-
-      for (const span of spans) {
-        const text = span.innerText.trim();
-        if (text && !span.querySelector('svg')) {
-          moduleTitle = text;
-          break;
-        }
-      }
-
-      if (!moduleTitle) {
-        moduleTitle = heading.innerText.trim();
-      }
-
-      let moduleNumber = '';
-      const parentDiv = heading.closest('div');
-      if (parentDiv) {
-        const descriptionNode = parentDiv.querySelector('p.section__description');
-        if (descriptionNode) {
-          moduleNumber = descriptionNode.innerText.trim();
-        }
-      }
-
-      const fullModuleTitle = moduleNumber ? `${moduleNumber} - ${moduleTitle}` : moduleTitle;
-      let sectionDiv = null;
-      let element = heading.closest('div[class]');
-
-      while (element) {
-        const next = element.nextElementSibling;
-        if (next && next.id && next.id.startsWith('inner_section')) {
-          sectionDiv = next;
-          break;
-        }
-
-        element = element.parentElement;
-        if (!element || element.tagName.toLowerCase() === 'body') {
-          break;
-        }
-      }
-
-      if (!sectionDiv) {
-        continue;
-      }
-
-      for (const link of sectionDiv.querySelectorAll('a.lesson__title')) {
-        const title = (link.innerText || '').replace(/\s+/g, ' ').trim();
-        if (title && link.href) {
-          lessons.push({
-            moduleTitle: fullModuleTitle || 'Sin modulo',
-            title,
-            url: link.href
-          });
-        }
-      }
-    }
-
-    if (lessons.length > 0) {
-      return lessons;
-    }
-
-    return Array.from(document.querySelectorAll('a.lesson__title')).map(link => ({
-      moduleTitle: 'Sin modulo',
-      title: (link.innerText || '').replace(/\s+/g, ' ').trim(),
-      url: link.href
-    })).filter(lesson => lesson.title && lesson.url);
-  });
-}
-
-async function extractVideoPlaylist(page, lesson) {
-  const mediaRequests = [];
-  const onRequest = request => {
-    const url = request.url();
-    if (/\.m3u8(\?|$)/i.test(url)) {
-      mediaRequests.push(url);
-    }
-  };
-
-  page.on('request', onRequest);
-  try {
-    await page.goto(lesson.url, { waitUntil: 'networkidle', timeout: 45000 });
-    await page.waitForTimeout(5000);
-
-    const pageData = await page.evaluate(() => ({
-      title: document.querySelector('h1,h2,h3')?.innerText?.replace(/\s+/g, ' ').trim() || '',
-      iframeSrc: document.querySelector('iframe[src*="pandavideo"]')?.src || ''
-    }));
-
-    const uniqueRequests = Array.from(new Set(mediaRequests));
-    const selectedPlaylist =
-      uniqueRequests.find(url => /360p\/video\.m3u8$/i.test(url)) ||
-      uniqueRequests.find(url => /480p\/video\.m3u8$/i.test(url)) ||
-      uniqueRequests.find(url => /720p\/video\.m3u8$/i.test(url)) ||
-      uniqueRequests.find(url => /1080p\/video\.m3u8$/i.test(url)) ||
-      uniqueRequests.find(url => /playlist\.m3u8$/i.test(url)) ||
-      uniqueRequests.find(url => /360p\/video\.m3u8/i.test(url) && !/token=/i.test(url)) ||
-      uniqueRequests.find(url => /video\.m3u8/i.test(url) && !/token=/i.test(url)) ||
-      '';
-
-    return {
-      ...lesson,
-      pageTitle: pageData.title || lesson.title,
-      iframeSrc: pageData.iframeSrc,
-      playlistUrl: selectedPlaylist,
-      isVideo: Boolean(pageData.iframeSrc && selectedPlaylist)
-    };
-  } finally {
-    page.off('request', onRequest);
-  }
-}
-
-function runProcess(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...options
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', chunk => {
-      stdout += chunk.toString();
-    });
-
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString();
-    });
-
-    child.on('error', reject);
-    child.on('close', (code, signal) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-        return;
-      }
-
-      reject(new Error(`${command} exited with code ${code}${signal ? ` and signal ${signal}` : ''}\n${stderr || stdout}`));
-    });
-  });
-}
-
-async function extractAudio(lesson, outputPath) {
-  const headers = [
-    'Referer: https://miembro.daxus.com/',
-    'User-Agent: Mozilla/5.0'
-  ].join('\r\n') + '\r\n';
-
-  await runProcess(ffmpegPath, [
-    '-y',
-    '-headers',
-    headers,
-    '-i',
-    lesson.playlistUrl,
-    '-vn',
-    '-ac',
-    '1',
-    '-ar',
-    '16000',
-    '-acodec',
-    'libmp3lame',
-    '-b:a',
-    '64k',
-    outputPath
+  const staySignedInNo = page.locator('input[type="button"][value="No"], button:has-text("No")').first();
+  const staySignedInYes = page.locator('input[type="submit"][value="Sí"], input[type="submit"][value="Yes"], button:has-text("Sí"), button:has-text("Yes")').first();
+  await Promise.race([
+    staySignedInNo.waitFor({ state: 'visible', timeout: 8000 }).then(() => staySignedInNo.click()).catch(() => {}),
+    staySignedInYes.waitFor({ state: 'visible', timeout: 8000 }).then(() => staySignedInYes.click()).catch(() => {}),
+    page.waitForURL(url => !/login\.microsoftonline\.com|login\.live\.com/i.test(String(url)), { timeout: 8000 }).catch(() => {})
   ]);
+
+  await page.goto(SHAREPOINT_SITE_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(2000);
+
+  if (/login\.microsoftonline\.com|login\.live\.com/i.test(page.url())) {
+    throw new Error('No se pudo completar el login de SharePoint. Si hay MFA, usa SHAREPOINT_STORAGE_STATE_B64.');
+  }
 }
 
-function createOpenAiTranscriber() {
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return async audioPath => {
-    const result = await client.audio.transcriptions.create({
-      file: fs.createReadStream(audioPath),
-      model: OPENAI_TRANSCRIPTION_MODEL,
-      language: 'es'
+async function sharePointRestGet(page, url) {
+  const response = await page.request.get(url, {
+    headers: {
+      Accept: 'application/json;odata=nometadata'
+    },
+    timeout: 60000
+  });
+
+  if (!response.ok()) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`SharePoint REST fallo ${response.status()} ${response.statusText()}: ${body.slice(0, 500)}`);
+  }
+
+  return response.json();
+}
+
+async function listSharePointFolders(page, serverRelativeUrl) {
+  const json = await sharePointRestGet(page, sharePointApiUrl(serverRelativeUrl, 'Folders', 'Name,ServerRelativeUrl'));
+  return (json.value || [])
+    .filter(item => item.Name && !item.Name.startsWith('_'))
+    .map(item => ({
+      name: item.Name,
+      serverRelativeUrl: item.ServerRelativeUrl
+    }))
+    .sort((a, b) => collator.compare(a.name, b.name));
+}
+
+async function listSharePointFiles(page, serverRelativeUrl) {
+  const json = await sharePointRestGet(page, sharePointApiUrl(serverRelativeUrl, 'Files', 'Name,ServerRelativeUrl,Length,TimeLastModified'));
+  return (json.value || [])
+    .filter(item => item.Name)
+    .map(item => ({
+      name: item.Name,
+      serverRelativeUrl: item.ServerRelativeUrl,
+      length: Number(item.Length || 0),
+      timeLastModified: item.TimeLastModified
+    }))
+    .sort((a, b) => collator.compare(a.name, b.name));
+}
+
+async function findSharePointCourseFolder(page, courseName) {
+  const target = normalizeText(courseName);
+  const queue = [{ name: path.posix.basename(SHAREPOINT_COURSES_SERVER_RELATIVE), serverRelativeUrl: SHAREPOINT_COURSES_SERVER_RELATIVE, depth: 0 }];
+  const candidates = [];
+  let visited = 0;
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    visited += 1;
+
+    if (visited > SHAREPOINT_DISCOVERY_LIMIT) {
+      break;
+    }
+
+    const currentName = normalizeText(current.name);
+    if (current.depth > 0 && (currentName === target || currentName.includes(target) || target.includes(currentName))) {
+      candidates.push(current);
+    }
+
+    if (current.depth >= SHAREPOINT_DISCOVERY_DEPTH) {
+      continue;
+    }
+
+    const folders = await listSharePointFolders(page, current.serverRelativeUrl);
+    for (const folder of folders) {
+      queue.push({ ...folder, depth: current.depth + 1 });
+    }
+  }
+
+  if (candidates.length === 0) {
+    throw new Error(`No encontre una carpeta de SharePoint para el curso "${courseName}" dentro de ${SHAREPOINT_COURSES_SERVER_RELATIVE}.`);
+  }
+
+  candidates.sort((a, b) => {
+    const aName = normalizeText(a.name);
+    const bName = normalizeText(b.name);
+    const aExact = aName === target ? 0 : 1;
+    const bExact = bName === target ? 0 : 1;
+    return aExact - bExact || a.depth - b.depth || collator.compare(a.name, b.name);
+  });
+
+  return candidates[0];
+}
+
+async function findEditedFolder(page, moduleFolder) {
+  const folders = await listSharePointFolders(page, moduleFolder.serverRelativeUrl);
+  return folders.find(folder => normalizeText(folder.name) === 'editados') || null;
+}
+
+async function extractSharePointLessons(page, courseFolder) {
+  const moduleFolders = await listSharePointFolders(page, courseFolder.serverRelativeUrl);
+  const lessons = [];
+
+  for (const moduleFolder of moduleFolders) {
+    const moduleName = normalizeText(moduleFolder.name);
+    if (moduleName.includes('material')) {
+      continue;
+    }
+
+    const editedFolder = await findEditedFolder(page, moduleFolder);
+    if (!editedFolder) {
+      continue;
+    }
+
+    const files = await listSharePointFiles(page, editedFolder.serverRelativeUrl);
+    const videoFiles = files.filter(file => /\.mp4$/i.test(file.name));
+
+    for (const file of videoFiles) {
+      lessons.push({
+        moduleTitle: moduleFolder.name,
+        title: file.name.replace(/\.mp4$/i, '').replace(/\s+/g, ' ').trim(),
+        fileName: file.name,
+        serverRelativeUrl: file.serverRelativeUrl,
+        streamUrl: streamUrlFor(file.serverRelativeUrl),
+        isVideo: true
+      });
+    }
+  }
+
+  if (lessons.length === 0) {
+    throw new Error(`No encontre videos .mp4 dentro de carpetas "editados" en ${courseFolder.serverRelativeUrl}.`);
+  }
+
+  return lessons;
+}
+
+async function ensureTranscriptPanel(page) {
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const status = await page.evaluate(() => {
+      const body = document.body.innerText || '';
+      const entries = Array.from(document.querySelectorAll('[role="group"] [role="listitem"], [role="group"] li'))
+        .map(el => el.textContent?.trim())
+        .filter(Boolean);
+
+      return {
+        hasEntries: entries.length > 0,
+        hasTranscriptPanel: /Transcripci[oó]n|Transcript/i.test(body),
+        hasReadButton: /Leer transcripci[oó]n|Transcript/i.test(body)
+      };
     });
 
-    return String(result.text || '').replace(/\s+/g, ' ').trim();
-  };
+    if (status.hasEntries) {
+      return;
+    }
+
+    if (status.hasReadButton) {
+      const readButton = page.getByRole('button', { name: /Leer transcripci[oó]n|Transcript/i }).first();
+      if (await readButton.count()) {
+        await readButton.click({ timeout: 5000 }).catch(() => {});
+      }
+    }
+
+    await page.waitForTimeout(1000);
+  }
+}
+
+async function downloadTranscriptVtt(page, lesson, outputRoot, index) {
+  await page.goto(lesson.streamUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await ensureTranscriptPanel(page);
+
+  const panel = page.getByRole('complementary', { name: /Transcripci[oó]n|Transcript/i }).first();
+  const downloadButton = panel.getByRole('button', { name: /Descargar|Download/i }).first();
+  await downloadButton.waitFor({ state: 'visible', timeout: 15000 });
+  await downloadButton.click();
+
+  const vttMenuItem = page.getByRole('menuitem', { name: /\.vtt/i }).first();
+  await vttMenuItem.waitFor({ state: 'visible', timeout: 10000 });
+
+  const download = await Promise.all([
+    page.waitForEvent('download', { timeout: 30000 }),
+    vttMenuItem.click()
+  ]).then(([downloadResult]) => downloadResult);
+
+  const vttPath = path.join(outputRoot, `${String(index + 1).padStart(2, '0')}-${sanitizeFileName(lesson.title)}.vtt`);
+  await download.saveAs(vttPath);
+
+  const transcript = parseVtt(await fs.promises.readFile(vttPath, 'utf8'));
+  if (!transcript) {
+    throw new Error(`La transcripcion VTT descargada esta vacia para "${lesson.title}".`);
+  }
+
+  return transcript;
+}
+
+async function getVisibleTranscriptEntries(page) {
+  return page.evaluate(() => Array.from(document.querySelectorAll('[role="group"]')).map(group => {
+    const time = group.getAttribute('aria-label') || '';
+    const item = group.querySelector('[role="listitem"], li');
+    const text = item?.textContent?.replace(/\s+/g, ' ').trim() || '';
+    return { time, text };
+  }).filter(entry => entry.text && /minuto|segundo|hora|hour|minute|second/i.test(entry.time)));
+}
+
+async function collectTranscriptFromPanel(page) {
+  const seen = new Map();
+  let stagnant = 0;
+  let previousMax = -1;
+  const duration = await page.evaluate(() => {
+    const video = document.querySelector('video');
+    return video && Number.isFinite(video.duration) ? video.duration : null;
+  });
+
+  for (let step = 0; step < 120; step += 1) {
+    const entries = await getVisibleTranscriptEntries(page);
+    for (const entry of entries) {
+      const seconds = parseTranscriptTimeToSeconds(entry.time);
+      const key = `${seconds}|${entry.text.slice(0, 100)}`;
+      if (!seen.has(key)) {
+        seen.set(key, { ...entry, seconds });
+      }
+    }
+
+    const maxSeconds = Math.max(-1, ...Array.from(seen.values()).map(entry => entry.seconds));
+    if (duration && maxSeconds >= duration - 20) {
+      break;
+    }
+
+    if (maxSeconds <= previousMax) {
+      stagnant += 1;
+    } else {
+      stagnant = 0;
+    }
+
+    if (stagnant >= 8) {
+      break;
+    }
+
+    previousMax = Math.max(previousMax, maxSeconds);
+
+    const scrolled = await page.evaluate(() => {
+      const scroller = Array.from(document.querySelectorAll('*'))
+        .find(el => el.scrollHeight > el.clientHeight + 200 && /Generado por Microsoft|Generated by Microsoft/i.test(el.textContent || ''));
+
+      if (!scroller) {
+        return false;
+      }
+
+      scroller.scrollTop += 900;
+      return true;
+    }).catch(() => false);
+
+    if (!scrolled) {
+      await page.mouse.wheel(0, 900);
+    }
+
+    await page.waitForTimeout(300);
+  }
+
+  const ordered = Array.from(seen.values()).sort((a, b) => a.seconds - b.seconds);
+  return ordered.map(entry => entry.text).join(' ').replace(/\s+/g, ' ').trim();
+}
+
+async function extractTranscriptFromStreamPanel(page, lesson) {
+  await page.goto(lesson.streamUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await ensureTranscriptPanel(page);
+
+  const transcript = await collectTranscriptFromPanel(page);
+  if (!transcript) {
+    throw new Error(`No pude leer la transcripcion del panel de Stream para "${lesson.title}".`);
+  }
+
+  return transcript;
+}
+
+async function extractSharePointTranscript(page, lesson, outputRoot, index) {
+  try {
+    return await downloadTranscriptVtt(page, lesson, outputRoot, index);
+  } catch (error) {
+    console.log(`  No pude descargar VTT (${error.message}). Intentare leer el panel de Stream.`);
+    return extractTranscriptFromStreamPanel(page, lesson);
+  }
 }
 
 async function uploadTranscriptionToNotion(pageId, filePath) {
@@ -396,23 +586,6 @@ async function uploadTranscriptionToNotion(pageId, filePath) {
   return upload.id;
 }
 
-function groupLessonsByModule(lessons) {
-  const groups = [];
-  const indexesByModule = new Map();
-
-  for (const lesson of lessons) {
-    const moduleTitle = lesson.moduleTitle || 'Sin modulo';
-    if (!indexesByModule.has(moduleTitle)) {
-      indexesByModule.set(moduleTitle, groups.length);
-      groups.push({ title: moduleTitle, lessons: [] });
-    }
-
-    groups[indexesByModule.get(moduleTitle)].lessons.push(lesson);
-  }
-
-  return groups;
-}
-
 function createTranscriptDocument(courseName, lessons, outputPath) {
   const children = [
     new Paragraph({
@@ -428,7 +601,7 @@ function createTranscriptDocument(courseName, lessons, outputPath) {
     new Paragraph({
       children: [
         new TextRun({
-          text: `Generado el ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })}.`,
+          text: `Generado el ${new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' })} desde transcripciones automaticas de Microsoft Stream.`,
           italics: true,
           size: 22,
           font: 'Arial'
@@ -442,8 +615,12 @@ function createTranscriptDocument(courseName, lessons, outputPath) {
   let globalLessonIndex = 0;
 
   for (const [moduleIndex, module] of modules.entries()) {
+    const moduleTitle = /^modulo|^m[oó]dulo/i.test(module.title)
+      ? module.title
+      : `Modulo ${moduleIndex + 1}: ${module.title}`;
+
     children.push(new Paragraph({
-      text: `Modulo ${moduleIndex + 1}: ${module.title}`,
+      text: moduleTitle,
       heading: HeadingLevel.HEADING_1,
       spacing: { before: 360, after: 160 }
     }));
@@ -456,17 +633,9 @@ function createTranscriptDocument(courseName, lessons, outputPath) {
         spacing: { before: 220, after: 120 }
       }));
 
-      if (!lesson.isVideo) {
-        children.push(new Paragraph({
-          children: [new TextRun({ text: 'Contenido sin video detectado; se omitio la transcripcion.', italics: true })],
-          spacing: { after: 160 }
-        }));
-        continue;
-      }
-
       if (!lesson.transcript) {
         children.push(new Paragraph({
-          children: [new TextRun({ text: 'No se pudo generar transcripcion para esta leccion.', italics: true })],
+          children: [new TextRun({ text: 'No se pudo obtener transcripcion automatica para esta clase.', italics: true })],
           spacing: { after: 160 }
         }));
         continue;
@@ -504,7 +673,7 @@ function createTranscriptDocument(courseName, lessons, outputPath) {
 }
 
 async function cleanupIntermediateFiles(outputRoot, outputDocx) {
-  const removableExtensions = new Set(['.wav', '.mp3', '.txt', '.json']);
+  const removableExtensions = new Set(['.wav', '.mp3', '.txt', '.json', '.vtt']);
   const entries = await fs.promises.readdir(outputRoot, { withFileTypes: true });
   let removedCount = 0;
   let removedBytes = 0;
@@ -533,12 +702,14 @@ async function cleanupIntermediateFiles(outputRoot, outputDocx) {
   console.log(`Limpieza local completada: ${removedCount} archivos eliminados (${(removedBytes / 1024 / 1024).toFixed(1)} MB).`);
 }
 
-function validateEnv(metadataOnly) {
-  const required = ['DAXUS_EMAIL', 'DAXUS_PASSWORD', 'NOTION_API_KEY', 'NOTION_DATABASE_ID'];
+function validateEnv() {
+  const required = ['NOTION_API_KEY', 'NOTION_DATABASE_ID'];
   const missing = required.filter(name => !process.env[name]);
+  const hasSharePointLogin = Boolean(getSharePointUser() && getSharePointPassword());
+  const hasSharePointStorage = Boolean(process.env.SHAREPOINT_STORAGE_STATE || process.env.SHAREPOINT_STORAGE_STATE_B64);
 
-  if (!metadataOnly && !process.env.OPENAI_API_KEY) {
-    missing.push('OPENAI_API_KEY');
+  if (!hasSharePointLogin && !hasSharePointStorage) {
+    missing.push('SHAREPOINT_EMAIL/SHAREPOINT_PASSWORD o SHAREPOINT_STORAGE_STATE_B64');
   }
 
   if (missing.length > 0) {
@@ -574,86 +745,51 @@ async function processNotionCourse(page, notionCourse, options) {
     throw new Error(`La propiedad "${TRANSCRIPTION_PROPERTY_NAME}" debe ser de tipo files.`);
   }
 
-  const courseUrl = await findDaxusCourseUrl(page, notionCourse.title);
-  console.log(`Curso Daxus: ${courseUrl}`);
+  const courseFolder = await findSharePointCourseFolder(page, notionCourse.title);
+  console.log(`Carpeta SharePoint: ${courseFolder.serverRelativeUrl}`);
 
-  let lessons = await extractLessons(page, courseUrl);
+  let lessons = await extractSharePointLessons(page, courseFolder);
   if (lessonLimit > 0) {
     lessons = lessons.slice(0, lessonLimit);
   }
 
-  console.log(`Lecciones encontradas: ${lessons.length}`);
-  const videoLessons = [];
-
-  for (const [index, lesson] of lessons.entries()) {
-    console.log(`[${index + 1}/${lessons.length}] Detectando video: ${lesson.title}`);
-    const videoLesson = await extractVideoPlaylist(page, lesson);
-    videoLessons.push(videoLesson);
-    console.log(videoLesson.isVideo ? '  video detectado' : '  sin video detectado');
-  }
+  console.log(`Clases editadas encontradas: ${lessons.length}`);
 
   const metadataPath = path.join(outputRoot, 'metadata.json');
   await fs.promises.writeFile(metadataPath, JSON.stringify({
     course: notionCourse,
-    daxusCourseUrl: courseUrl,
-    lessons: videoLessons.map(lesson => ({
+    sharePointCourseFolder: courseFolder,
+    lessons: lessons.map(lesson => ({
       moduleTitle: lesson.moduleTitle,
       title: lesson.title,
-      url: lesson.url,
-      isVideo: lesson.isVideo,
-      iframeSrc: lesson.iframeSrc,
-      hasPlaylist: Boolean(lesson.playlistUrl)
+      fileName: lesson.fileName,
+      streamUrl: lesson.streamUrl,
+      serverRelativeUrl: lesson.serverRelativeUrl
     }))
   }, null, 2));
   console.log(`Metadata local guardada: ${metadataPath}`);
 
   if (metadataOnly) {
-    return { status: 'metadata', lessons: videoLessons.length };
+    return { status: 'metadata', lessons: lessons.length };
   }
 
-  let transcriber;
-  const needsTranscription = videoLessons.some((lesson, index) => {
-    if (!lesson.isVideo) {
-      return false;
-    }
-
+  for (const [index, lesson] of lessons.entries()) {
     const baseName = `${String(index + 1).padStart(2, '0')}-${sanitizeFileName(lesson.title)}`;
-    const transcriptPath = path.join(outputRoot, `${baseName}.openai.txt`);
-    return overwrite || !fs.existsSync(transcriptPath);
-  });
-
-  if (needsTranscription) {
-    console.log(`Proveedor de transcripcion: OpenAI (${OPENAI_TRANSCRIPTION_MODEL})`);
-    transcriber = createOpenAiTranscriber();
-  } else {
-    console.log('Todas las transcripciones temporales ya existen. Regenerare solo el Word final.');
-  }
-
-  for (const [index, lesson] of videoLessons.entries()) {
-    if (!lesson.isVideo) {
-      continue;
-    }
-
-    const baseName = `${String(index + 1).padStart(2, '0')}-${sanitizeFileName(lesson.title)}`;
-    const audioPath = path.join(outputRoot, `${baseName}.mp3`);
-    const transcriptPath = path.join(outputRoot, `${baseName}.openai.txt`);
-
-    if (overwrite || !fs.existsSync(audioPath)) {
-      console.log(`[${index + 1}/${videoLessons.length}] Extrayendo audio: ${lesson.title}`);
-      await extractAudio(lesson, audioPath);
-    }
+    const transcriptPath = path.join(outputRoot, `${baseName}.sharepoint.txt`);
 
     if (!overwrite && fs.existsSync(transcriptPath)) {
       lesson.transcript = await fs.promises.readFile(transcriptPath, 'utf8');
-    } else {
-      console.log(`[${index + 1}/${videoLessons.length}] Transcribiendo: ${lesson.title}`);
-      lesson.transcript = await transcriber(audioPath);
-      await fs.promises.writeFile(transcriptPath, lesson.transcript, 'utf8');
+      console.log(`[${index + 1}/${lessons.length}] Transcripcion reutilizada: ${lesson.title}`);
+      continue;
     }
+
+    console.log(`[${index + 1}/${lessons.length}] Transcripcion SharePoint/Stream: ${lesson.title}`);
+    lesson.transcript = await extractSharePointTranscript(page, lesson, outputRoot, index);
+    await fs.promises.writeFile(transcriptPath, lesson.transcript, 'utf8');
   }
 
   const outputDocx = path.join(outputRoot, `${sanitizeFileName(courseName)} - transcripcion.docx`);
-  await createTranscriptDocument(courseName, videoLessons, outputDocx);
+  await createTranscriptDocument(courseName, lessons, outputDocx);
   console.log(`Documento Word generado localmente: ${outputDocx}`);
 
   let fileUploadId = null;
@@ -671,8 +807,8 @@ async function processNotionCourse(page, notionCourse, options) {
   return {
     status: 'processed',
     fileUploadId,
-    lessons: videoLessons.length,
-    videoLessons: videoLessons.filter(lesson => lesson.isVideo).length,
+    lessons: lessons.length,
+    videoLessons: lessons.length,
     outputDocx
   };
 }
@@ -691,7 +827,7 @@ async function main() {
   const courseLimit = courseLimitArg ? Number(courseLimitArg.split('=')[1]) : 0;
   const courseName = args.filter(arg => !arg.startsWith('--')).join(' ') || 'Liderazgo Personal';
 
-  validateEnv(metadataOnly);
+  validateEnv();
 
   let targetCourses;
 
@@ -723,13 +859,16 @@ async function main() {
     return;
   }
 
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
+  const browser = await chromium.launch({
+    headless: process.env.PLAYWRIGHT_HEADFUL !== 'true'
+  });
+  const context = await createBrowserContext(browser);
+  const page = await context.newPage();
   const results = [];
 
   try {
-    console.log('Entrando a Daxus LATAM...');
-    await signIn(page);
+    console.log('Entrando a SharePoint/Stream...');
+    await signInSharePoint(page);
 
     for (const [index, notionCourse] of targetCourses.entries()) {
       console.log(`\nCurso ${index + 1}/${targetCourses.length}`);
@@ -748,6 +887,7 @@ async function main() {
       }
     }
   } finally {
+    await context.close().catch(() => {});
     await browser.close().catch(() => {});
   }
 
@@ -770,7 +910,7 @@ async function main() {
 
 if (require.main === module) {
   main().catch(error => {
-    console.error('Error generando transcripcion local:', error);
+    console.error('Error generando transcripcion:', error);
     process.exit(1);
   });
 }
