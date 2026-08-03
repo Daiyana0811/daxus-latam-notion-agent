@@ -22,8 +22,11 @@ Configure these repository secrets before enabling the workflow:
 - `DAXUS_PASSWORD`
 - `NOTION_API_KEY`
 - `NOTION_DATABASE_ID`
-- `OPENAI_API_KEY` when using API-based transcription
-- `OPENAI_TRANSCRIPTION_MODEL` optional, defaults to `gpt-4o-transcribe`
+- `SHAREPOINT_EMAIL`
+- `SHAREPOINT_PASSWORD`
+- `SHAREPOINT_STORAGE_STATE_B64` optional alternative for SharePoint accounts that require MFA
+- `SHAREPOINT_SITE_BASE_URL` optional, defaults to `https://zakidatasas.sharepoint.com/sites/general`
+- `SHAREPOINT_COURSES_SERVER_RELATIVE` optional, defaults to `/sites/general/Documentos compartidos/1. COMUNICACIONES/1.CURSOS`
 
 The local `.env` file is intentionally ignored and must not be committed.
 
@@ -39,13 +42,14 @@ npm run check
 Generate the local Word transcript for the test course:
 
 ```bash
-npm run transcribe:api
+npm run transcribe:sharepoint
 ```
 
 The transcription flow checks that the Notion course has an empty `Apostilla`
-files property, extracts the Daxus lesson structure, transcribes video lessons,
-groups the final Word document by module, and deletes temporary audio/text files
-after the `.docx` is created.
+files property, finds the matching SharePoint course folder, reads video files
+inside `editados` folders, downloads or extracts the automatic Microsoft Stream
+transcripts, groups the final Word document by module, and deletes temporary
+`.vtt`/text metadata after the `.docx` is created.
 
 Upload the test course transcript to Notion:
 
