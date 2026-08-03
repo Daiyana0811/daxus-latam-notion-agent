@@ -23,6 +23,10 @@ on:
         description: 'Replace existing Transcripcion files.'
         required: false
         default: 'false'
+      course_name:
+        description: 'Specific course name to transcribe. Empty means pending courses.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -98,12 +102,17 @@ jobs:
           SHAREPOINT_SITE_BASE_URL: https://zakidatasas.sharepoint.com/sites/general
           SHAREPOINT_COURSES_SERVER_RELATIVE: /sites/general/Documentos compartidos/1. COMUNICACIONES/1.CURSOS
           COURSE_LIMIT: ${{ github.event.inputs.course_limit }}
+          COURSE_NAME: ${{ github.event.inputs.course_name }}
           OVERWRITE_TRANSCRIPTIONS: ${{ github.event.inputs.overwrite }}
         shell: bash
         run: |
-          args=(--all --upload-notion)
+          if [ -n "$COURSE_NAME" ]; then
+            args=("$COURSE_NAME" --upload-notion)
+          else
+            args=(--all --upload-notion)
+          fi
 
-          if [ -n "$COURSE_LIMIT" ]; then
+          if [ -z "$COURSE_NAME" ] && [ -n "$COURSE_LIMIT" ]; then
             args+=("--course-limit=$COURSE_LIMIT")
           fi
 
