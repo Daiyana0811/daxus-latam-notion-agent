@@ -13,6 +13,8 @@ links.json
 texts.json
 modules_structure.txt
 transcriptions/
+.sharepoint-storage-state.json
+.sharepoint-storage-state.min.json
 
 debug*.js
 extract*.js
