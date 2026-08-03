@@ -22,6 +22,7 @@ const SHAREPOINT_COURSES_SERVER_RELATIVE = process.env.SHAREPOINT_COURSES_SERVER
   '/sites/general/Documentos compartidos/1. COMUNICACIONES/1.CURSOS';
 const SHAREPOINT_DISCOVERY_DEPTH = Number(process.env.SHAREPOINT_DISCOVERY_DEPTH || 6);
 const SHAREPOINT_DISCOVERY_LIMIT = Number(process.env.SHAREPOINT_DISCOVERY_LIMIT || 2000);
+const SHAREPOINT_EDITED_FOLDER_DEPTH = Number(process.env.SHAREPOINT_EDITED_FOLDER_DEPTH || 6);
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const collator = new Intl.Collator('es', { numeric: true, sensitivity: 'base' });
@@ -354,32 +355,67 @@ async function findSharePointCourseFolder(page, courseName) {
   return candidates[0];
 }
 
-async function findEditedFolder(page, moduleFolder) {
-  const folders = await listSharePointFolders(page, moduleFolder.serverRelativeUrl);
-  return folders.find(folder => normalizeText(folder.name) === 'editados') || null;
+function getModuleTitleFromEditedFolder(courseFolder, editedFolder) {
+  const relativePath = editedFolder.serverRelativeUrl
+    .replace(courseFolder.serverRelativeUrl, '')
+    .split('/')
+    .map(part => decodeURIComponent(part).trim())
+    .filter(Boolean);
+
+  const editedIndex = relativePath.findIndex(part => ['editado', 'editados'].includes(normalizeText(part)));
+  const parentParts = relativePath.slice(0, editedIndex > -1 ? editedIndex : relativePath.length);
+  const moduleParts = parentParts.filter(part => !['videos', 'video'].includes(normalizeText(part)));
+
+  return moduleParts.at(-1) || parentParts.at(-1) || 'Sin modulo';
+}
+
+async function findEditedFolders(page, courseFolder) {
+  const editedFolders = [];
+  const queue = [{ ...courseFolder, depth: 0 }];
+  let visited = 0;
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    visited += 1;
+
+    if (visited > SHAREPOINT_DISCOVERY_LIMIT || current.depth > SHAREPOINT_EDITED_FOLDER_DEPTH) {
+      continue;
+    }
+
+    const folders = await listSharePointFolders(page, current.serverRelativeUrl);
+    for (const folder of folders) {
+      const folderName = normalizeText(folder.name);
+
+      if (['editado', 'editados'].includes(folderName)) {
+        editedFolders.push({
+          ...folder,
+          moduleTitle: getModuleTitleFromEditedFolder(courseFolder, folder)
+        });
+        continue;
+      }
+
+      if (folderName.includes('material')) {
+        continue;
+      }
+
+      queue.push({ ...folder, depth: current.depth + 1 });
+    }
+  }
+
+  return editedFolders.sort((a, b) => collator.compare(a.serverRelativeUrl, b.serverRelativeUrl));
 }
 
 async function extractSharePointLessons(page, courseFolder) {
-  const moduleFolders = await listSharePointFolders(page, courseFolder.serverRelativeUrl);
+  const editedFolders = await findEditedFolders(page, courseFolder);
   const lessons = [];
 
-  for (const moduleFolder of moduleFolders) {
-    const moduleName = normalizeText(moduleFolder.name);
-    if (moduleName.includes('material')) {
-      continue;
-    }
-
-    const editedFolder = await findEditedFolder(page, moduleFolder);
-    if (!editedFolder) {
-      continue;
-    }
-
+  for (const editedFolder of editedFolders) {
     const files = await listSharePointFiles(page, editedFolder.serverRelativeUrl);
     const videoFiles = files.filter(file => /\.mp4$/i.test(file.name));
 
     for (const file of videoFiles) {
       lessons.push({
-        moduleTitle: moduleFolder.name,
+        moduleTitle: editedFolder.moduleTitle,
         title: file.name.replace(/\.mp4$/i, '').replace(/\s+/g, ' ').trim(),
         fileName: file.name,
         serverRelativeUrl: file.serverRelativeUrl,
@@ -390,7 +426,7 @@ async function extractSharePointLessons(page, courseFolder) {
   }
 
   if (lessons.length === 0) {
-    throw new Error(`No encontre videos .mp4 dentro de carpetas "editados" en ${courseFolder.serverRelativeUrl}.`);
+    throw new Error(`No encontre videos .mp4 dentro de carpetas "editado/editados" en ${courseFolder.serverRelativeUrl}. Carpetas encontradas: ${editedFolders.length}.`);
   }
 
   return lessons;
