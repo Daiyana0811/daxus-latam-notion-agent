@@ -72,13 +72,6 @@ jobs:
         if: steps.schedule_check.outputs.should_run == 'true'
         run: npx playwright install --with-deps chromium
 
-      - name: Install FFmpeg
-        if: steps.schedule_check.outputs.should_run == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          ffmpeg -version
-
       - name: Validate source
         if: steps.schedule_check.outputs.should_run == 'true'
         run: npm run check
@@ -99,9 +92,11 @@ jobs:
           DAXUS_PASSWORD: ${{ secrets.DAXUS_PASSWORD }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: 901c32bcda2c8204a1ff817988963f14
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_TRANSCRIPTION_MODEL: ${{ secrets.OPENAI_TRANSCRIPTION_MODEL }}
-          FFMPEG_PATH: ffmpeg
+          SHAREPOINT_EMAIL: ${{ secrets.SHAREPOINT_EMAIL }}
+          SHAREPOINT_PASSWORD: ${{ secrets.SHAREPOINT_PASSWORD }}
+          SHAREPOINT_STORAGE_STATE_B64: ${{ secrets.SHAREPOINT_STORAGE_STATE_B64 }}
+          SHAREPOINT_SITE_BASE_URL: https://zakidatasas.sharepoint.com/sites/general
+          SHAREPOINT_COURSES_SERVER_RELATIVE: /sites/general/Documentos compartidos/1. COMUNICACIONES/1.CURSOS
           COURSE_LIMIT: ${{ github.event.inputs.course_limit }}
           OVERWRITE_TRANSCRIPTIONS: ${{ github.event.inputs.overwrite }}
         shell: bash
