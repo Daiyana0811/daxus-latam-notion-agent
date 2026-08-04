@@ -16,6 +16,7 @@ const {
 const TRANSCRIPTION_PROPERTY_NAME = 'Transcripcion';
 const APOSTILLA_PROPERTY_NAME = 'Apostilla';
 const DOCX_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const VIDEO_FILE_PATTERN = /\.(mp4|mov|m4v|webm|mkv)$/i;
 
 const SHAREPOINT_SITE_BASE_URL = (process.env.SHAREPOINT_SITE_BASE_URL || 'https://zakidatasas.sharepoint.com/sites/general').replace(/\/$/, '');
 const SHAREPOINT_COURSES_SERVER_RELATIVE = process.env.SHAREPOINT_COURSES_SERVER_RELATIVE ||
@@ -272,19 +273,44 @@ async function signInSharePoint(page) {
 }
 
 async function sharePointRestGet(page, url) {
-  const response = await page.request.get(url, {
-    headers: {
-      Accept: 'application/json;odata=nometadata'
-    },
-    timeout: 60000
-  });
+  const acceptHeaders = [
+    'application/json;odata=nometadata',
+    'application/json;odata=minimalmetadata',
+    'application/json;odata=verbose',
+    'application/json'
+  ];
+  let lastError;
 
-  if (!response.ok()) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`SharePoint REST fallo ${response.status()} ${response.statusText()}: ${body.slice(0, 500)}`);
+  for (const accept of acceptHeaders) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await page.request.get(url, {
+        headers: { Accept: accept },
+        timeout: 60000
+      });
+
+      if (response.ok()) {
+        const json = await response.json();
+        if (json.d?.results) {
+          return { value: json.d.results };
+        }
+        if (json.d) {
+          return json.d;
+        }
+        return json;
+      }
+
+      const body = await response.text().catch(() => '');
+      lastError = new Error(`SharePoint REST fallo ${response.status()} ${response.statusText()}: ${body.slice(0, 500)}`);
+
+      if (![406, 429, 500, 502, 503, 504].includes(response.status())) {
+        throw lastError;
+      }
+
+      await page.waitForTimeout(1000 * (attempt + 1));
+    }
   }
 
-  return response.json();
+  throw lastError;
 }
 
 async function listSharePointFolders(page, serverRelativeUrl) {
@@ -326,7 +352,11 @@ async function findSharePointCourseFolder(page, courseName) {
     }
 
     const currentName = normalizeText(current.name);
-    if (current.depth > 0 && (currentName === target || currentName.includes(target) || target.includes(currentName))) {
+    const fuzzyMatchAllowed = currentName.length >= 6 && target.length >= 6;
+    if (current.depth > 0 && (
+      currentName === target ||
+      (fuzzyMatchAllowed && (currentName.includes(target) || target.includes(currentName)))
+    )) {
       candidates.push(current);
     }
 
@@ -411,12 +441,12 @@ async function extractSharePointLessons(page, courseFolder) {
 
   for (const editedFolder of editedFolders) {
     const files = await listSharePointFiles(page, editedFolder.serverRelativeUrl);
-    const videoFiles = files.filter(file => /\.mp4$/i.test(file.name));
+    const videoFiles = files.filter(file => VIDEO_FILE_PATTERN.test(file.name));
 
     for (const file of videoFiles) {
       lessons.push({
         moduleTitle: editedFolder.moduleTitle,
-        title: file.name.replace(/\.mp4$/i, '').replace(/\s+/g, ' ').trim(),
+        title: file.name.replace(VIDEO_FILE_PATTERN, '').replace(/\s+/g, ' ').trim(),
         fileName: file.name,
         serverRelativeUrl: file.serverRelativeUrl,
         streamUrl: streamUrlFor(file.serverRelativeUrl),
@@ -426,7 +456,7 @@ async function extractSharePointLessons(page, courseFolder) {
   }
 
   if (lessons.length === 0) {
-    throw new Error(`No encontre videos .mp4 dentro de carpetas "editado/editados" en ${courseFolder.serverRelativeUrl}. Carpetas encontradas: ${editedFolders.length}.`);
+    throw new Error(`No encontre archivos de video dentro de carpetas "editado/editados" en ${courseFolder.serverRelativeUrl}. Carpetas encontradas: ${editedFolders.length}.`);
   }
 
   return lessons;
@@ -781,10 +811,22 @@ async function processNotionCourse(page, notionCourse, options) {
     throw new Error(`La propiedad "${TRANSCRIPTION_PROPERTY_NAME}" debe ser de tipo files.`);
   }
 
-  const courseFolder = await findSharePointCourseFolder(page, notionCourse.title);
+  let courseFolder;
+  try {
+    courseFolder = await findSharePointCourseFolder(page, notionCourse.title);
+  } catch (error) {
+    console.log(`Omitido: no encontre carpeta de SharePoint para este curso (${error.message || error}).`);
+    return { status: 'skipped', reason: 'sharepoint_folder_not_found' };
+  }
   console.log(`Carpeta SharePoint: ${courseFolder.serverRelativeUrl}`);
 
-  let lessons = await extractSharePointLessons(page, courseFolder);
+  let lessons;
+  try {
+    lessons = await extractSharePointLessons(page, courseFolder);
+  } catch (error) {
+    console.log(`Omitido: no encontre videos editados para este curso (${error.message || error}).`);
+    return { status: 'skipped', reason: 'sharepoint_videos_not_found' };
+  }
   if (lessonLimit > 0) {
     lessons = lessons.slice(0, lessonLimit);
   }
@@ -820,8 +862,15 @@ async function processNotionCourse(page, notionCourse, options) {
     }
 
     console.log(`[${index + 1}/${lessons.length}] Transcripcion SharePoint/Stream: ${lesson.title}`);
-    lesson.transcript = await extractSharePointTranscript(page, lesson, outputRoot, index);
-    await fs.promises.writeFile(transcriptPath, lesson.transcript, 'utf8');
+    try {
+      lesson.transcript = await extractSharePointTranscript(page, lesson, outputRoot, index);
+      await fs.promises.writeFile(transcriptPath, lesson.transcript, 'utf8');
+    } catch (error) {
+      lesson.transcript = '';
+      lesson.transcriptError = error.message || String(error);
+      console.warn(`  Sin transcripcion para esta clase: ${lesson.transcriptError}`);
+      await fs.promises.writeFile(`${transcriptPath}.error.txt`, lesson.transcriptError, 'utf8');
+    }
   }
 
   const outputDocx = path.join(outputRoot, `${sanitizeFileName(courseName)} - transcripcion.docx`);
