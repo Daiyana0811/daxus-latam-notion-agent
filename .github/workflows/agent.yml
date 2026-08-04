@@ -14,7 +14,7 @@ on:
       course_limit:
         description: 'Maximum pending courses to transcribe in this run. Empty means all.'
         required: false
-        default: '3'
+        default: ''
       auto_continue:
         description: 'Queue another batch if pending courses remain.'
         required: false
