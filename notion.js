@@ -5,6 +5,8 @@ const { Client } = require('@notionhq/client');
 const notionApiKey = process.env.NOTION_API_KEY;
 const databaseId = process.env.NOTION_DATABASE_ID;
 const CATEGORY_PROPERTY_NAME = 'Categoria';
+const MEDIA_PROPERTY_NAME = 'Archivos y multimedia';
+const COVER_FILE_NAME = 'Portada';
 
 if (!notionApiKey) {
   throw new Error('Missing required environment variable: NOTION_API_KEY');
@@ -17,6 +19,86 @@ if (!databaseId) {
 const notion = new Client({ auth: notionApiKey });
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let cachedDataSourceId;
+
+function sanitizeFileName(value) {
+  return String(value || 'cover')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120) || 'cover';
+}
+
+function extensionFromContentType(contentType) {
+  const normalized = String(contentType || '').split(';')[0].trim().toLowerCase();
+
+  if (normalized === 'image/png') return '.png';
+  if (normalized === 'image/webp') return '.webp';
+  if (normalized === 'image/gif') return '.gif';
+  if (normalized === 'image/svg+xml') return '.svg';
+
+  return '.jpg';
+}
+
+async function downloadCoverImage(course) {
+  const response = await fetch(course.coverUrl);
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status} descargando portada`);
+  }
+
+  const contentType = response.headers.get('content-type') || 'image/jpeg';
+
+  if (!contentType.toLowerCase().startsWith('image/')) {
+    throw new Error(`La portada no parece ser imagen (${contentType})`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const filename = `${sanitizeFileName(course.title)} - portada${extensionFromContentType(contentType)}`;
+
+  return { buffer, contentType, filename };
+}
+
+async function uploadImageBuffer({ buffer, contentType, filename }) {
+  const fileBlob = new Blob([buffer], { type: contentType });
+  const upload = await notion.fileUploads.create({
+    mode: 'single_part',
+    filename,
+    content_type: contentType
+  });
+
+  const sentUpload = await notion.fileUploads.send({
+    file_upload_id: upload.id,
+    file: {
+      filename,
+      data: fileBlob
+    }
+  });
+
+  if (sentUpload.status !== 'uploaded') {
+    throw new Error(`Notion no marco la portada como uploaded. Estado recibido: ${sentUpload.status}`);
+  }
+
+  return upload.id;
+}
+
+async function uploadCoverImage(course, includePageCover) {
+  if (!course.coverUrl || !course.coverUrl.startsWith('http')) {
+    return null;
+  }
+
+  try {
+    const image = await downloadCoverImage(course);
+    const mediaUploadId = await uploadImageBuffer(image);
+    const coverUploadId = includePageCover ? await uploadImageBuffer(image) : null;
+
+    return { mediaUploadId, coverUploadId };
+  } catch (error) {
+    console.warn(`No pude subir portada como archivo para "${course.title}". Uso URL externa como respaldo: ${error.message || error}`);
+    return null;
+  }
+}
 
 function normalizeSelectName(value) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
@@ -128,7 +210,10 @@ async function listExistingCoursesFromDataSource(dataSourceId) {
       const title = getPageTitle(page);
 
       if (title) {
-        existingCourses[title] = page.id;
+        existingCourses[title] = {
+          id: page.id,
+          mediaFiles: getMediaFiles(page)
+        };
       }
     }
 
@@ -163,7 +248,10 @@ async function listExistingCoursesFromDatabaseSearch() {
       const title = getPageTitle(page);
 
       if (title) {
-        existingCourses[title] = page.id;
+        existingCourses[title] = {
+          id: page.id,
+          mediaFiles: getMediaFiles(page)
+        };
       }
     }
 
@@ -173,7 +261,64 @@ async function listExistingCoursesFromDatabaseSearch() {
   return existingCourses;
 }
 
-function buildProperties(course) {
+function getMediaFiles(page) {
+  const property = page.properties && page.properties[MEDIA_PROPERTY_NAME];
+  return property && property.type === 'files' ? property.files : [];
+}
+
+function shouldUploadCover(existingCourse) {
+  if (!existingCourse) {
+    return true;
+  }
+
+  const mediaFiles = existingCourse.mediaFiles || [];
+  return mediaFiles.length === 0 || mediaFiles.some(file => file.type !== 'file');
+}
+
+function buildCoverProperty(course, coverUploads, shouldSetFallback) {
+  if (coverUploads && coverUploads.mediaUploadId) {
+    return {
+      files: [
+        {
+          type: 'file_upload',
+          name: COVER_FILE_NAME,
+          file_upload: { id: coverUploads.mediaUploadId }
+        }
+      ]
+    };
+  }
+
+  if (shouldSetFallback && course.coverUrl && course.coverUrl.startsWith('http')) {
+    return {
+      files: [
+        {
+          type: 'external',
+          name: COVER_FILE_NAME,
+          external: { url: course.coverUrl }
+        }
+      ]
+    };
+  }
+
+  return null;
+}
+
+function buildPageCover(course, coverUploads) {
+  if (coverUploads && coverUploads.coverUploadId) {
+    return {
+      type: 'file_upload',
+      file_upload: { id: coverUploads.coverUploadId }
+    };
+  }
+
+  if (course.coverUrl && course.coverUrl.startsWith('http')) {
+    return { type: 'external', external: { url: course.coverUrl } };
+  }
+
+  return null;
+}
+
+function buildProperties(course, coverUploads, shouldSetCoverFallback = false) {
   const category = normalizeSelectName(course.category);
   const properties = {
     'Nombre del recurso': {
@@ -194,16 +339,9 @@ function buildProperties(course) {
     };
   }
 
-  if (course.coverUrl && course.coverUrl.startsWith('http')) {
-    properties['Archivos y multimedia'] = {
-      files: [
-        {
-          type: 'external',
-          name: 'Portada',
-          external: { url: course.coverUrl }
-        }
-      ]
-    };
+  const coverProperty = buildCoverProperty(course, coverUploads, shouldSetCoverFallback);
+  if (coverProperty) {
+    properties[MEDIA_PROPERTY_NAME] = coverProperty;
   }
 
   return properties;
@@ -286,14 +424,15 @@ function buildBlocks(course) {
   return blocks;
 }
 
-async function updateCoursePage(pageId, course, properties, blocks) {
+async function updateCoursePage(pageId, course, properties, blocks, coverUploads, shouldSetCoverFallback) {
   const payload = {
     page_id: pageId,
     properties
   };
 
-  if (course.coverUrl && course.coverUrl.startsWith('http')) {
-    payload.cover = { type: 'external', external: { url: course.coverUrl } };
+  const pageCover = coverUploads || shouldSetCoverFallback ? buildPageCover(course, coverUploads) : null;
+  if (pageCover) {
+    payload.cover = pageCover;
   }
 
   await notion.pages.update(payload);
@@ -313,15 +452,21 @@ async function updateCoursePage(pageId, course, properties, blocks) {
   }
 }
 
-async function createCoursePage(properties, blocks) {
+async function createCoursePage(properties, blocks, course, coverUploads) {
   const dataSourceId = await getDataSourceId();
   const parent = dataSourceId ? { data_source_id: dataSourceId } : { type: 'database_id', database_id: databaseId };
-
-  await notion.pages.create({
+  const payload = {
     parent,
     properties,
     children: blocks
-  });
+  };
+
+  const pageCover = buildPageCover(course, coverUploads);
+  if (pageCover) {
+    payload.cover = pageCover;
+  }
+
+  await notion.pages.create(payload);
 }
 
 async function syncCoursesWithDatabase(courses) {
@@ -332,16 +477,20 @@ async function syncCoursesWithDatabase(courses) {
     console.log(`Existing courses in Notion: ${Object.keys(existingCourses).length}`);
 
     for (const course of courses) {
-      const properties = buildProperties(course);
+      const existingCourse = existingCourses[course.title];
+      const needsCoverUpload = shouldUploadCover(existingCourse);
+      const coverUploads = needsCoverUpload ? await uploadCoverImage(course, true) : null;
+      const shouldSetCoverFallback = needsCoverUpload && !coverUploads;
+      const properties = buildProperties(course, coverUploads, shouldSetCoverFallback);
       const blocks = buildBlocks(course);
 
-      if (existingCourses[course.title]) {
-        const pageId = existingCourses[course.title];
+      if (existingCourse) {
+        const pageId = existingCourse.id;
         console.log(`[UPDATE] Course already exists: ${course.title} (${pageId})`);
-        await updateCoursePage(pageId, course, properties, blocks);
+        await updateCoursePage(pageId, course, properties, blocks, coverUploads, shouldSetCoverFallback);
       } else {
         console.log(`[CREATE] New course detected: ${course.title}`);
-        await createCoursePage(properties, blocks);
+        await createCoursePage(properties, blocks, course, coverUploads);
       }
     }
 
