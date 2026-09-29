@@ -12,6 +12,15 @@ function isFilesPropertyEmpty(property) {
   return Boolean(property && property.type === 'files' && property.files.length === 0);
 }
 
+function isAggregateMasterCourse(title) {
+  return /^master\b/i.test(String(title || '').trim());
+}
+
+function getPageTitle(page) {
+  const titleProperty = Object.values(page.properties).find(property => property.type === 'title');
+  return (titleProperty?.title || []).map(item => item.plain_text).join('').trim();
+}
+
 async function getDataSourceId(databaseId) {
   const database = await notion.databases.retrieve({ database_id: databaseId });
   return database.data_sources?.[0]?.id || null;
@@ -27,6 +36,7 @@ async function main() {
   let cursor;
   let pending = 0;
   let completed = 0;
+  let skippedMasters = 0;
 
   do {
     const response = dataSourceId
@@ -46,6 +56,12 @@ async function main() {
         continue;
       }
 
+      const title = getPageTitle(page);
+      if (isAggregateMasterCourse(title)) {
+        skippedMasters += 1;
+        continue;
+      }
+
       const apostillaEmpty = isFilesPropertyEmpty(page.properties[APOSTILLA_PROPERTY_NAME]);
       const transcriptionEmpty = isFilesPropertyEmpty(page.properties[TRANSCRIPTION_PROPERTY_NAME]);
 
@@ -61,9 +77,10 @@ async function main() {
 
   console.log(`Pending transcriptions: ${pending}`);
   console.log(`Completed transcriptions: ${completed}`);
+  console.log(`Skipped aggregate Master courses: ${skippedMasters}`);
 
   if (process.env.GITHUB_OUTPUT) {
-    fs.appendFileSync(process.env.GITHUB_OUTPUT, `pending=${pending}\ncompleted=${completed}\n`);
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `pending=${pending}\ncompleted=${completed}\nskipped_masters=${skippedMasters}\n`);
   }
 }
 

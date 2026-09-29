@@ -28,6 +28,11 @@ const SHAREPOINT_EDITED_FOLDER_DEPTH = Number(process.env.SHAREPOINT_EDITED_FOLD
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const collator = new Intl.Collator('es', { numeric: true, sensitivity: 'base' });
 
+const DEFAULT_SHAREPOINT_COURSE_FOLDER_OVERRIDES = {
+  'analisis de datos con python':
+    '/sites/general/Documentos compartidos/1. COMUNICACIONES/1.CURSOS/2025/CURSOS DE PROGRAMACIÓN/MASTER PYTHON/Master Pyton-Profe Juan David/3. Análisis de datos con python'
+};
+
 function normalizeText(value) {
   return String(value || '')
     .normalize('NFD')
@@ -35,6 +40,25 @@ function normalizeText(value) {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+function isAggregateMasterCourse(title) {
+  return /^master\b/i.test(String(title || '').trim());
+}
+
+function getSharePointCourseFolderOverrides() {
+  const overrides = { ...DEFAULT_SHAREPOINT_COURSE_FOLDER_OVERRIDES };
+
+  if (!process.env.SHAREPOINT_COURSE_FOLDER_OVERRIDES) {
+    return overrides;
+  }
+
+  const parsed = JSON.parse(process.env.SHAREPOINT_COURSE_FOLDER_OVERRIDES);
+  for (const [courseName, serverRelativeUrl] of Object.entries(parsed)) {
+    overrides[normalizeText(courseName)] = serverRelativeUrl;
+  }
+
+  return overrides;
 }
 
 function sanitizeFileName(value) {
@@ -224,11 +248,42 @@ async function createBrowserContext(browser) {
   return browser.newContext({ acceptDownloads: true });
 }
 
+function isMicrosoftLoginUrl(url) {
+  return /login\.microsoftonline\.com|login\.live\.com/i.test(String(url));
+}
+
+async function isVisible(locator, timeout = 1500) {
+  try {
+    await locator.waitFor({ state: 'visible', timeout });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function clickIfVisible(locator, timeout = 1500) {
+  if (!(await isVisible(locator, timeout))) {
+    return false;
+  }
+
+  await locator.click();
+  return true;
+}
+
+async function waitForSharePointOrPassword(page, passwordInput, timeout = 30000) {
+  const result = await Promise.race([
+    passwordInput.waitFor({ state: 'visible', timeout }).then(() => 'password').catch(() => null),
+    page.waitForURL(url => !isMicrosoftLoginUrl(url), { timeout }).then(() => 'sharepoint').catch(() => null)
+  ]);
+
+  return result;
+}
+
 async function signInSharePoint(page) {
   await page.goto(SHAREPOINT_SITE_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(2000);
 
-  if (!/login\.microsoftonline\.com|login\.live\.com/i.test(page.url())) {
+  if (!isMicrosoftLoginUrl(page.url())) {
     return;
   }
 
@@ -240,34 +295,47 @@ async function signInSharePoint(page) {
   }
 
   const emailInput = page.locator('input[type="email"], input[name="loginfmt"]').first();
-  if (await emailInput.count()) {
+  if (await isVisible(emailInput, 5000)) {
     await emailInput.fill(email);
     await Promise.all([
       page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
       page.keyboard.press('Enter')
     ]);
+    await page.waitForTimeout(1500);
+  } else {
+    const accountOption = page.getByText(email, { exact: false }).first();
+    if (await clickIfVisible(accountOption, 5000)) {
+      await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+    }
   }
 
   const passwordInput = page.locator('input[type="password"], input[name="passwd"]').first();
-  await passwordInput.waitFor({ state: 'visible', timeout: 30000 });
-  await passwordInput.fill(password);
-  await Promise.all([
-    page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
-    page.keyboard.press('Enter')
-  ]);
+  const nextStep = await waitForSharePointOrPassword(page, passwordInput);
+
+  if (nextStep === 'password') {
+    await passwordInput.fill(password);
+    await Promise.all([
+      page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
+      page.keyboard.press('Enter')
+    ]);
+  } else if (nextStep !== 'sharepoint' && isMicrosoftLoginUrl(page.url())) {
+    const title = await page.title().catch(() => '');
+    throw new Error(`No pude llegar al campo de contraseña de SharePoint. URL actual: ${page.url()}. Titulo: ${title}. Si Microsoft esta pidiendo MFA o aprobacion adicional, actualiza SHAREPOINT_STORAGE_STATE_B64.`);
+  }
 
   const staySignedInNo = page.locator('input[type="button"][value="No"], button:has-text("No")').first();
   const staySignedInYes = page.locator('input[type="submit"][value="Sí"], input[type="submit"][value="Yes"], button:has-text("Sí"), button:has-text("Yes")').first();
   await Promise.race([
     staySignedInNo.waitFor({ state: 'visible', timeout: 8000 }).then(() => staySignedInNo.click()).catch(() => {}),
     staySignedInYes.waitFor({ state: 'visible', timeout: 8000 }).then(() => staySignedInYes.click()).catch(() => {}),
-    page.waitForURL(url => !/login\.microsoftonline\.com|login\.live\.com/i.test(String(url)), { timeout: 8000 }).catch(() => {})
+    page.waitForURL(url => !isMicrosoftLoginUrl(url), { timeout: 8000 }).catch(() => {})
   ]);
 
   await page.goto(SHAREPOINT_SITE_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(2000);
 
-  if (/login\.microsoftonline\.com|login\.live\.com/i.test(page.url())) {
+  if (isMicrosoftLoginUrl(page.url())) {
     throw new Error('No se pudo completar el login de SharePoint. Si hay MFA, usa SHAREPOINT_STORAGE_STATE_B64.');
   }
 }
@@ -339,6 +407,17 @@ async function listSharePointFiles(page, serverRelativeUrl) {
 
 async function findSharePointCourseFolder(page, courseName) {
   const target = normalizeText(courseName);
+  const overrides = getSharePointCourseFolderOverrides();
+
+  if (overrides[target]) {
+    return {
+      name: path.posix.basename(overrides[target]),
+      serverRelativeUrl: overrides[target],
+      depth: 0,
+      override: true
+    };
+  }
+
   const queue = [{ name: path.posix.basename(SHAREPOINT_COURSES_SERVER_RELATIVE), serverRelativeUrl: SHAREPOINT_COURSES_SERVER_RELATIVE, depth: 0 }];
   const candidates = [];
   let visited = 0;
@@ -919,7 +998,9 @@ async function main() {
   if (allCourses) {
     const allNotionCourses = await listNotionCourses();
     const emptyApostillaCourses = allNotionCourses.filter(course => course.apostillaEmpty);
-    targetCourses = emptyApostillaCourses.filter(course =>
+    const aggregateMasterCourses = emptyApostillaCourses.filter(course => isAggregateMasterCourse(course.title));
+    const individualCourses = emptyApostillaCourses.filter(course => !isAggregateMasterCourse(course.title));
+    targetCourses = individualCourses.filter(course =>
       overwrite || includeExistingTranscriptions || course.transcriptionEmpty
     );
 
@@ -929,6 +1010,7 @@ async function main() {
 
     console.log(`Cursos en Notion: ${allNotionCourses.length}`);
     console.log(`Cursos con Apostilla vacia: ${emptyApostillaCourses.length}`);
+    console.log(`Cursos Master omitidos: ${aggregateMasterCourses.length}`);
     console.log(`Cursos pendientes de Transcripcion: ${targetCourses.length}`);
   } else {
     console.log(`Buscando curso en Notion: ${courseName}`);
