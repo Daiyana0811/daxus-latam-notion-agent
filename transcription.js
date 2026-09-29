@@ -270,13 +270,28 @@ async function clickIfVisible(locator, timeout = 1500) {
   return true;
 }
 
-async function waitForSharePointOrPassword(page, passwordInput, timeout = 30000) {
-  const result = await Promise.race([
-    passwordInput.waitFor({ state: 'visible', timeout }).then(() => 'password').catch(() => null),
-    page.waitForURL(url => !isMicrosoftLoginUrl(url), { timeout }).then(() => 'sharepoint').catch(() => null)
-  ]);
+async function submitMicrosoftLoginStep(page) {
+  const submitButton = page.locator(
+    '#idSIButton9, input[type="submit"], button[type="submit"], button:has-text("Siguiente"), button:has-text("Next"), button:has-text("Iniciar sesión"), button:has-text("Sign in")'
+  ).first();
 
-  return result;
+  if (await clickIfVisible(submitButton, 2500)) {
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(1500);
+    return;
+  }
+
+  await Promise.all([
+    page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
+    page.keyboard.press('Enter')
+  ]);
+  await page.waitForTimeout(1500);
+}
+
+async function getVisiblePageText(page) {
+  return page.locator('body').innerText({ timeout: 3000 })
+    .then(text => text.replace(/\s+/g, ' ').trim().slice(0, 500))
+    .catch(() => '');
 }
 
 async function signInSharePoint(page) {
@@ -294,43 +309,61 @@ async function signInSharePoint(page) {
     throw new Error('SharePoint pide inicio de sesion. Configura SHAREPOINT_EMAIL y SHAREPOINT_PASSWORD, o SHAREPOINT_STORAGE_STATE_B64 si la cuenta usa MFA.');
   }
 
-  const emailInput = page.locator('input[type="email"], input[name="loginfmt"]').first();
-  if (await isVisible(emailInput, 5000)) {
-    await emailInput.fill(email);
-    await Promise.all([
-      page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
-      page.keyboard.press('Enter')
-    ]);
-    await page.waitForTimeout(1500);
-  } else {
+  const deadline = Date.now() + 90000;
+
+  while (Date.now() < deadline && isMicrosoftLoginUrl(page.url())) {
+    const emailInput = page.locator('input[type="email"], input[name="loginfmt"], #i0116').first();
+    if (await isVisible(emailInput, 2500)) {
+      await emailInput.fill(email);
+      await submitMicrosoftLoginStep(page);
+      continue;
+    }
+
+    const passwordInput = page.locator('input[type="password"], input[name="passwd"], #i0118').first();
+    if (await isVisible(passwordInput, 2500)) {
+      await passwordInput.fill(password);
+      await submitMicrosoftLoginStep(page);
+      continue;
+    }
+
     const accountOption = page.getByText(email, { exact: false }).first();
-    if (await clickIfVisible(accountOption, 5000)) {
+    if (await clickIfVisible(accountOption, 2500)) {
       await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(1500);
+      continue;
     }
+
+    const useAnotherAccount = page.locator(
+      '[data-test-id="signin-options"], [data-test-id="otherTile"], div:has-text("Usar otra cuenta"), div:has-text("Use another account"), button:has-text("Usar otra cuenta"), button:has-text("Use another account")'
+    ).first();
+    if (await clickIfVisible(useAnotherAccount, 2500)) {
+      await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      continue;
+    }
+
+    const staySignedInNo = page.locator('input[type="button"][value="No"], button:has-text("No")').first();
+    if (await clickIfVisible(staySignedInNo, 1000)) {
+      await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      continue;
+    }
+
+    const staySignedInYes = page.locator('input[type="submit"][value="Sí"], input[type="submit"][value="Yes"], button:has-text("Sí"), button:has-text("Yes")').first();
+    if (await clickIfVisible(staySignedInYes, 1000)) {
+      await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      continue;
+    }
+
+    await page.waitForTimeout(2000);
   }
 
-  const passwordInput = page.locator('input[type="password"], input[name="passwd"]').first();
-  const nextStep = await waitForSharePointOrPassword(page, passwordInput);
-
-  if (nextStep === 'password') {
-    await passwordInput.fill(password);
-    await Promise.all([
-      page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {}),
-      page.keyboard.press('Enter')
-    ]);
-  } else if (nextStep !== 'sharepoint' && isMicrosoftLoginUrl(page.url())) {
+  if (isMicrosoftLoginUrl(page.url())) {
     const title = await page.title().catch(() => '');
-    throw new Error(`No pude llegar al campo de contraseña de SharePoint. URL actual: ${page.url()}. Titulo: ${title}. Si Microsoft esta pidiendo MFA o aprobacion adicional, actualiza SHAREPOINT_STORAGE_STATE_B64.`);
+    const visibleText = await getVisiblePageText(page);
+    throw new Error(`No pude completar el login de SharePoint. URL actual: ${page.url()}. Titulo: ${title}. Texto visible: ${visibleText}. Si Microsoft esta pidiendo MFA o aprobacion adicional, actualiza SHAREPOINT_STORAGE_STATE_B64.`);
   }
-
-  const staySignedInNo = page.locator('input[type="button"][value="No"], button:has-text("No")').first();
-  const staySignedInYes = page.locator('input[type="submit"][value="Sí"], input[type="submit"][value="Yes"], button:has-text("Sí"), button:has-text("Yes")').first();
-  await Promise.race([
-    staySignedInNo.waitFor({ state: 'visible', timeout: 8000 }).then(() => staySignedInNo.click()).catch(() => {}),
-    staySignedInYes.waitFor({ state: 'visible', timeout: 8000 }).then(() => staySignedInYes.click()).catch(() => {}),
-    page.waitForURL(url => !isMicrosoftLoginUrl(url), { timeout: 8000 }).catch(() => {})
-  ]);
 
   await page.goto(SHAREPOINT_SITE_BASE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(2000);
