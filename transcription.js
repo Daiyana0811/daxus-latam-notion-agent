@@ -511,6 +511,56 @@ function getModuleTitleFromEditedFolder(courseFolder, editedFolder) {
   return moduleParts.at(-1) || parentParts.at(-1) || 'Sin modulo';
 }
 
+function getRelativePathParts(parentFolder, childUrl) {
+  return childUrl
+    .replace(parentFolder.serverRelativeUrl, '')
+    .split('/')
+    .map(part => decodeURIComponent(part).trim())
+    .filter(Boolean);
+}
+
+function getModuleTitleFromEditedFile(editedFolder, file) {
+  const relativePath = getRelativePathParts(editedFolder, file.serverRelativeUrl);
+  const parentParts = relativePath.slice(0, -1);
+  const moduleParts = parentParts.filter(part => !['videos', 'video'].includes(normalizeText(part)));
+
+  return moduleParts[0] || editedFolder.moduleTitle || 'Sin modulo';
+}
+
+async function listVideoFilesInsideEditedFolder(page, editedFolder) {
+  const videos = [];
+  const queue = [{ ...editedFolder, depth: 0 }];
+  let visited = 0;
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    visited += 1;
+
+    if (visited > SHAREPOINT_DISCOVERY_LIMIT || current.depth > SHAREPOINT_EDITED_FOLDER_DEPTH) {
+      continue;
+    }
+
+    const files = await listSharePointFiles(page, current.serverRelativeUrl);
+    for (const file of files) {
+      if (VIDEO_FILE_PATTERN.test(file.name)) {
+        videos.push(file);
+      }
+    }
+
+    const folders = await listSharePointFolders(page, current.serverRelativeUrl);
+    for (const folder of folders) {
+      const folderName = normalizeText(folder.name);
+      if (folderName.includes('material')) {
+        continue;
+      }
+
+      queue.push({ ...folder, depth: current.depth + 1 });
+    }
+  }
+
+  return videos.sort((a, b) => collator.compare(a.serverRelativeUrl, b.serverRelativeUrl));
+}
+
 async function findEditedFolders(page, courseFolder) {
   const editedFolders = [];
   const queue = [{ ...courseFolder, depth: 0 }];
@@ -552,12 +602,11 @@ async function extractSharePointLessons(page, courseFolder) {
   const lessons = [];
 
   for (const editedFolder of editedFolders) {
-    const files = await listSharePointFiles(page, editedFolder.serverRelativeUrl);
-    const videoFiles = files.filter(file => VIDEO_FILE_PATTERN.test(file.name));
+    const videoFiles = await listVideoFilesInsideEditedFolder(page, editedFolder);
 
     for (const file of videoFiles) {
       lessons.push({
-        moduleTitle: editedFolder.moduleTitle,
+        moduleTitle: getModuleTitleFromEditedFile(editedFolder, file),
         title: file.name.replace(VIDEO_FILE_PATTERN, '').replace(/\s+/g, ' ').trim(),
         fileName: file.name,
         serverRelativeUrl: file.serverRelativeUrl,
