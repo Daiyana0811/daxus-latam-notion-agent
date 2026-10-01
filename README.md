@@ -2,6 +2,9 @@
 
 This agent signs in to Daxus LATAM, extracts available course data with Playwright, and syncs it into a Notion database.
 
+Operational rules that must persist across future changes are kept in
+[`AGENT_MEMORY.md`](AGENT_MEMORY.md).
+
 ## GitHub Actions schedule
 
 The workflow runs every Monday at 14:00 UTC and skips execution unless that Monday is the last Monday of the month. In America/Bogota, that is 9:00 AM.
@@ -46,8 +49,11 @@ npm run transcribe:sharepoint
 ```
 
 The transcription flow checks that the Notion course has an empty `Apostilla`
-files property, finds the matching SharePoint course folder, reads video files
-inside `editados` folders, downloads or extracts the automatic Microsoft Stream
+files property before doing any SharePoint lookup. Courses that already have
+any file in `Apostilla` must be skipped entirely for transcription. For eligible
+courses, the agent finds the matching SharePoint course folder, reads video
+files inside `Editado`/`Editados` folders, including module/class subfolders
+nested below them, downloads or extracts the automatic Microsoft Stream
 transcripts, groups the final Word document by module, and deletes temporary
 `.vtt`/text metadata after the `.docx` is created.
 
