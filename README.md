@@ -57,6 +57,11 @@ nested below them, downloads or extracts the automatic Microsoft Stream
 transcripts, groups the final Word document by module, and deletes temporary
 `.vtt`/text metadata after the `.docx` is created.
 
+Before writing the Word document, the agent keeps only timed spoken VTT cues
+and removes Stream/VTT metadata, markup, JSON, control characters, and UI text.
+It also removes Stream UUID cue identifiers that can otherwise appear between
+sentences. Technical code is preserved when it belongs to the lesson itself.
+
 Upload the test course transcript to Notion:
 
 ```bash

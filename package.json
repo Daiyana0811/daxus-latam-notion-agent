@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcription.js && node --check scripts/count-pending-transcriptions.js",
+    "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcript-cleaner.js && node --check transcription.js && node --check scripts/count-pending-transcriptions.js && node --test test/transcript-cleaner.test.js",
     "transcribe:test": "node transcription.js \"Proyectos con Lovable\" --keep-intermediate",
     "transcribe:sharepoint": "node transcription.js \"Proyectos con Lovable\"",
     "transcribe:upload": "node transcription.js \"Proyectos con Lovable\" --upload-notion",

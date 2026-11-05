@@ -12,6 +12,7 @@ const {
   TextRun,
   AlignmentType
 } = require('docx');
+const { cleanTranscriptText, parseVtt } = require('./transcript-cleaner');
 
 const TRANSCRIPTION_PROPERTY_NAME = 'Transcripcion';
 const APOSTILLA_PROPERTY_NAME = 'Apostilla';
@@ -112,24 +113,6 @@ function sharePointApiUrl(serverRelativeUrl, collection, select) {
 
 function streamUrlFor(serverRelativeUrl) {
   return `${SHAREPOINT_SITE_BASE_URL}/_layouts/15/stream.aspx?id=${encodeURIComponent(serverRelativeUrl)}&referrer=StreamWebApp.Web&referrerScenario=AddressBarCopied.view`;
-}
-
-function parseVtt(vttText) {
-  return String(vttText || '')
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(line =>
-      line &&
-      !/^WEBVTT/i.test(line) &&
-      !/^NOTE\b/i.test(line) &&
-      !/^\d+$/.test(line) &&
-      !/-->/i.test(line)
-    )
-    .map(line => line.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 function parseTranscriptTimeToSeconds(label) {
@@ -703,9 +686,14 @@ async function collectTranscriptFromPanel(page) {
     const entries = await getVisibleTranscriptEntries(page);
     for (const entry of entries) {
       const seconds = parseTranscriptTimeToSeconds(entry.time);
-      const key = `${seconds}|${entry.text.slice(0, 100)}`;
+      const text = cleanTranscriptText(entry.text);
+      if (!text) {
+        continue;
+      }
+
+      const key = `${seconds}|${text.slice(0, 100)}`;
       if (!seen.has(key)) {
-        seen.set(key, { ...entry, seconds });
+        seen.set(key, { ...entry, text, seconds });
       }
     }
 
@@ -746,7 +734,7 @@ async function collectTranscriptFromPanel(page) {
   }
 
   const ordered = Array.from(seen.values()).sort((a, b) => a.seconds - b.seconds);
-  return ordered.map(entry => entry.text).join(' ').replace(/\s+/g, ' ').trim();
+  return cleanTranscriptText(ordered.map(entry => entry.text).join(' '));
 }
 
 async function extractTranscriptFromStreamPanel(page, lesson) {
@@ -860,7 +848,8 @@ function createTranscriptDocument(courseName, lessons, outputPath) {
         spacing: { before: 220, after: 120 }
       }));
 
-      if (!lesson.transcript) {
+      const transcript = cleanTranscriptText(lesson.transcript);
+      if (!transcript) {
         children.push(new Paragraph({
           children: [new TextRun({ text: 'No se pudo obtener transcripcion automatica para esta clase.', italics: true })],
           spacing: { after: 160 }
@@ -868,7 +857,7 @@ function createTranscriptDocument(courseName, lessons, outputPath) {
         continue;
       }
 
-      const chunks = lesson.transcript.match(/.{1,1800}(?:\s|$)/g) || [lesson.transcript];
+      const chunks = transcript.match(/.{1,1800}(?:\s|$)/g) || [transcript];
       for (const chunk of chunks) {
         children.push(new Paragraph({
           children: [new TextRun({ text: chunk.trim(), font: 'Arial', size: 22 })],
@@ -1017,14 +1006,16 @@ async function processNotionCourse(page, notionCourse, options) {
     const transcriptPath = path.join(outputRoot, `${baseName}.sharepoint.txt`);
 
     if (!overwrite && fs.existsSync(transcriptPath)) {
-      lesson.transcript = await fs.promises.readFile(transcriptPath, 'utf8');
+      lesson.transcript = cleanTranscriptText(await fs.promises.readFile(transcriptPath, 'utf8'));
       console.log(`[${index + 1}/${lessons.length}] Transcripcion reutilizada: ${lesson.title}`);
       continue;
     }
 
     console.log(`[${index + 1}/${lessons.length}] Transcripcion SharePoint/Stream: ${lesson.title}`);
     try {
-      lesson.transcript = await extractSharePointTranscript(page, lesson, outputRoot, index);
+      lesson.transcript = cleanTranscriptText(
+        await extractSharePointTranscript(page, lesson, outputRoot, index)
+      );
       await fs.promises.writeFile(transcriptPath, lesson.transcript, 'utf8');
     } catch (error) {
       lesson.transcript = '';
