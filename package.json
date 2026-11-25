@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcript-cleaner.js && node --check transcription.js && node --check scripts/count-pending-transcriptions.js && node --test test/transcript-cleaner.test.js",
+    "check": "node --check index.js && node --check scraper.js && node --check notion.js && node --check transcript-cleaner.js && node --check transcription.js && node --check scripts/count-pending-transcriptions.js && node --check scripts/create-sharepoint-storage-state.js && node --test test/transcript-cleaner.test.js",
+    "sharepoint:refresh-session": "node scripts/create-sharepoint-storage-state.js",
     "transcribe:test": "node transcription.js \"Proyectos con Lovable\" --keep-intermediate",
     "transcribe:sharepoint": "node transcription.js \"Proyectos con Lovable\"",
     "transcribe:upload": "node transcription.js \"Proyectos con Lovable\" --upload-notion",
